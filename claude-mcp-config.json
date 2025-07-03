@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "espen-d6-production": {
+      "command": "npx",
+      "args": ["tsx", "src/mcp-server.ts"],
+      "cwd": "/Users/nieuwoudtgresse/Desktop/Espen MCP <> D6 /espen-d6-mcp-server",
+      "env": {
+        "D6_PRODUCTION_MODE": "true",
+        "D6_API_BASE_URL": "https://integrate.d6plus.co.za/api/v2",
+        "D6_API_USERNAME": "espenaitestapi",
+        "D6_API_PASSWORD": "qUz3mPcRsfSWxKR9qEnm"
+      }
+    }
+  }
+} 

@@ -1,0 +1,5 @@
+# Basic .gitignore
+node_modules/
+.env
+dist/
+logs/

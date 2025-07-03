@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "espen-d6-sandbox": {
+      "command": "npm",
+      "args": ["run", "mcp"],
+      "cwd": "/Users/nieuwoudtgresse/Desktop/Espen MCP <> D6 /espen-d6-mcp-server",
+      "env": {
+        "D6_SANDBOX_MODE": "true"
+      }
+    },
+    "espen-d6-production": {
+      "command": "npm", 
+      "args": ["run", "mcp:production"],
+      "cwd": "/Users/nieuwoudtgresse/Desktop/Espen MCP <> D6 /espen-d6-mcp-server",
+      "env": {
+        "D6_PRODUCTION_MODE": "true"
+      }
+    },
+    "espen-d6-hybrid": {
+      "command": "npm",
+      "args": ["run", "mcp:hybrid"],
+      "cwd": "/Users/nieuwoudtgresse/Desktop/Espen MCP <> D6 /espen-d6-mcp-server"
+    }
+  }
+} 
