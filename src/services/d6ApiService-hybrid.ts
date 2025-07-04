@@ -349,12 +349,12 @@ export class D6ApiServiceHybrid {
   }
 
   /**
-   * 🎓 Get learners for the integration (API is already scoped to integration 1694)
+   * 🎓 Get learners for a specific school (school_login_id in URL path)
    */
   public async getLearners(schoolId: number, options: { limit?: number; offset?: number } = {}): Promise<D6Learner[]> {
-    return this.hybridRequest<D6Learner[]>(
-      `adminplus/learners`, // No v1/ prefix, no school_id - API is scoped to our integration
-      { params: { ...options } },
+    const rawData = await this.hybridRequest<any[]>(
+      `/adminplus/learners/${schoolId}`, // Correct format: /v1/adminplus/learners/1694
+      { params: { ...options } }, // Query parameters for limit/offset only
       () => {
         const mockLearners = d6MockData.getLearners(schoolId, options);
         return mockLearners.map(mock => ({
@@ -369,14 +369,34 @@ export class D6ApiServiceHybrid {
         }));
       }
     );
+
+    // Transform real API data to match our interface
+    return rawData.map((learner: any) => ({
+      LearnerID: learner.id?.toString() || learner.LearnerID,
+      FirstName: learner.first_name || learner.FirstName,
+      LastName: learner.last_name || learner.LastName,
+      Grade: parseInt(learner.grade || learner.Grade || '0'),
+      LanguageOfInstruction: learner.home_language || learner.tuition_language || 'English',
+      Class: learner.register_class_name || `Grade ${learner.grade}`,
+      EnrollmentDate: learner.date_of_birth || learner.EnrollmentDate || '2024-01-01',
+      IsActive: true,
+      // Additional fields from D6
+      AdmissionNumber: learner.admission_number,
+      Gender: learner.gender,
+      DateOfBirth: learner.date_of_birth,
+      HomeLanguage: learner.home_language,
+      TuitionLanguage: learner.tuition_language,
+      EthnicGroup: learner.ethnic_group,
+      Nationality: learner.nationality
+    }));
   }
 
   /**
-   * 👨‍🏫 Get staff for the integration (API is already scoped to integration 1694)
+   * 👨‍🏫 Get staff for a specific school (school_login_id in URL path)
    */
   public async getStaff(schoolId: number): Promise<D6Staff[]> {
-    return this.hybridRequest<D6Staff[]>(
-      `adminplus/staffmembers`, // Correct endpoint name, no school_id
+    const rawData = await this.hybridRequest<any[]>(
+      `/adminplus/staffmembers/${schoolId}`, // Correct format: /v1/adminplus/staffmembers/1694
       {},
       () => {
         const mockStaff = d6MockData.getStaff(schoolId);
@@ -392,14 +412,33 @@ export class D6ApiServiceHybrid {
         }));
       }
     );
+
+    // Transform real API data to match our interface
+    return rawData.map((staffMember: any) => ({
+      StaffID: staffMember.id?.toString() || staffMember.StaffID,
+      FirstName: staffMember.first_name || staffMember.FirstName,
+      LastName: staffMember.last_name || staffMember.LastName,
+      StaffNumber: staffMember.staff_number || staffMember.employee_number || `STAFF${staffMember.id}`,
+      Department: staffMember.department || staffMember.Department || 'Academic',
+      Position: staffMember.position || staffMember.job_title || staffMember.Position || 'Teacher',
+      SubjectsTaught: staffMember.subjects_taught || staffMember.SubjectsTaught || [],
+      IsActive: staffMember.is_active !== false, // Default to active unless explicitly false
+      // Additional fields from D6
+      Email: staffMember.email_address,
+      Phone: staffMember.mobile_number,
+      Gender: staffMember.gender,
+      DateOfBirth: staffMember.date_of_birth,
+      QualificationLevel: staffMember.qualification_level,
+      YearsExperience: staffMember.years_experience
+    }));
   }
 
   /**
-   * 👪 Get parents for the integration (API is already scoped to integration 1694)
+   * 👪 Get parents for a specific school (school_login_id in URL path)
    */
   public async getParents(schoolId: number): Promise<D6Parent[]> {
-    return this.hybridRequest<D6Parent[]>(
-      `adminplus/parents`, // Correct endpoint, no school_id
+    const rawData = await this.hybridRequest<any[]>(
+      `/adminplus/parents/${schoolId}`, // Correct format: /v1/adminplus/parents/1694
       {},
       () => {
         const mockParents = d6MockData.getParents(schoolId);
@@ -416,6 +455,27 @@ export class D6ApiServiceHybrid {
         }));
       }
     );
+
+    // Transform real API data to match our interface
+    return rawData.map((parent: any) => ({
+      ParentID: parent.id?.toString() || parent.ParentID,
+      FirstName: parent.first_name || parent.FirstName,
+      LastName: parent.last_name || parent.LastName,
+      RelationshipType: parent.relationship_type || parent.relationship || parent.RelationshipType || 'Guardian',
+      PhoneNumber: parent.mobile_number || parent.phone_number || parent.PhoneNumber || '',
+      Email: parent.email_address || parent.email || parent.Email || '',
+      Address: parent.address || parent.Address || `${parent.first_name} ${parent.last_name} Address`,
+      LearnerIDs: parent.learner_ids || parent.LearnerIDs || [],
+      IsPrimaryContact: parent.is_primary_contact !== false, // Default to primary unless explicitly false
+      // Additional fields from D6
+      IdNumber: parent.id_number,
+      WorkPhone: parent.work_number,
+      HomePhone: parent.home_number,
+      Employer: parent.employer,
+      Occupation: parent.occupation,
+      Title: parent.title,
+      Gender: parent.gender
+    }));
   }
 
   /**

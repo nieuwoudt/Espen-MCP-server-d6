@@ -10,6 +10,7 @@
     "dev:simple": "tsx src/index-simple.ts",
     "dev:auth": "tsx src/index-auth.ts",
     "dev:phase4": "tsx src/index-phase4.ts",
+    "dev:vercel": "vercel dev",
     "test:d6": "tsx scripts/test-d6-connection.ts",
     "test:d6-simple": "tsx scripts/test-d6-simple.ts",
     "test:sandbox": "tsx scripts/test-d6-sandbox.ts",
@@ -23,6 +24,7 @@
     "mcp": "tsx src/mcp-server.ts",
     "mcp:hybrid": "tsx src/mcp-server-hybrid.ts",
     "mcp:production": "D6_PRODUCTION_MODE=true tsx src/mcp-server.ts",
+    "mcp:vercel": "vercel dev --listen 3000",
     "start": "node dist/index.js",
     "start:remote": "tsx src/mcp-server-remote.ts",
     "test": "jest",
@@ -34,7 +36,9 @@
     "db:migrate": "tsx src/db/migrate.ts",
     "db:seed": "tsx src/db/seed.ts",
     "type-check": "tsc --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "deploy": "vercel --prod",
+    "deploy:preview": "vercel"
   },
   "keywords": [
     "mcp",
@@ -88,7 +92,8 @@
     "supertest": "^6.3.3",
     "ts-jest": "^29.1.1",
     "tsx": "^4.6.0",
-    "typescript": "^5.3.2"
+    "typescript": "^5.3.2",
+    "vercel": "^39.2.3"
   },
   "engines": {
     "node": ">=18.0.0"

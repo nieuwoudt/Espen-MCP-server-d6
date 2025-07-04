@@ -1,13 +1,13 @@
 import { z } from 'zod';
 import { createMcpHandler } from '@vercel/mcp-adapter';
-import { D6ApiServiceHybrid } from '../src/services/d6ApiService-hybrid';
+import { D6ApiServiceHybrid } from '../../src/services/d6ApiService-hybrid';
 
 // Initialize D6 service
 const d6Config = {
-  baseUrl: process.env.D6_API_BASE_URL || 'https://integrate.d6plus.co.za/api/v2',
+  baseUrl: process.env.D6_API_BASE_URL || 'https://integrate.d6plus.co.za/api/v1',
   username: process.env.D6_API_USERNAME || 'espenaitestapi',
   password: process.env.D6_API_PASSWORD || 'qUz3mPcRsfSWxKR9qEnm',
-  enableMockData: true,
+  enableMockData: false,
   useMockDataFirst: false
 };
 
@@ -45,7 +45,7 @@ const handler = createMcpHandler(
       'get_learners',
       'Get student/learner information from D6',
       {
-        schoolId: z.number().describe('School ID to filter learners'),
+        schoolId: z.number().describe('School ID to filter learners (use 1694 for test school)'),
         limit: z.number().min(1).max(100).default(20).describe('Maximum number of learners to return')
       },
       async ({ schoolId, limit }) => {
@@ -73,7 +73,7 @@ const handler = createMcpHandler(
       'get_staff',
       'Get staff information from D6',
       {
-        schoolId: z.number().describe('School ID to filter staff'),
+        schoolId: z.number().describe('School ID to filter staff (use 1694 for test school)'),
         limit: z.number().min(1).max(50).default(20).describe('Maximum number of staff to return')
       },
       async ({ schoolId, limit }) => {
@@ -102,7 +102,7 @@ const handler = createMcpHandler(
       'get_parents',
       'Get parent information from D6',
       {
-        schoolId: z.number().describe('School ID to filter parents'),
+        schoolId: z.number().describe('School ID to filter parents (use 1694 for test school)'),
         limit: z.number().min(1).max(50).default(20).describe('Maximum number of parents to return')
       },
       async ({ schoolId, limit }) => {
@@ -222,7 +222,8 @@ const handler = createMcpHandler(
             production_mode: process.env.D6_PRODUCTION_MODE === 'true',
             mock_data_enabled: d6Config.enableMockData,
             deployment: 'Vercel',
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            test_school_id: 1694
           };
 
           return {

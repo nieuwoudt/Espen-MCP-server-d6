@@ -3,12 +3,26 @@
   "name": "espen-d6-mcp-server",
   "buildCommand": "npm run build",
   "functions": {
-    "api/*.ts": {
+    "api/**/*.ts": {
       "maxDuration": 30,
       "memory": 512
     }
   },
   "env": {
-    "NODE_ENV": "production"
-  }
+    "NODE_ENV": "production",
+    "D6_PRODUCTION_MODE": "true"
+  },
+  "build": {
+    "env": {
+      "D6_API_BASE_URL": "@d6_api_base_url",
+      "D6_API_USERNAME": "@d6_api_username", 
+      "D6_API_PASSWORD": "@d6_api_password"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/mcp",
+      "destination": "/api/mcp"
+    }
+  ]
 } 

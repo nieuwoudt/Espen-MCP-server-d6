@@ -10,6 +10,14 @@ export interface D6Learner {
   Class: string;
   EnrollmentDate: string;
   IsActive: boolean;
+  // Additional fields from D6 API
+  AdmissionNumber?: string;
+  Gender?: string;
+  DateOfBirth?: string;
+  HomeLanguage?: string;
+  TuitionLanguage?: string;
+  EthnicGroup?: string;
+  Nationality?: string;
 }
 
 export interface D6Subject {
@@ -74,6 +82,13 @@ export interface D6StaffMember {
   Position: string;
   SubjectsTaught: string[];
   IsActive: boolean;
+  // Additional fields from D6 API
+  Email?: string;
+  Phone?: string;
+  Gender?: string;
+  DateOfBirth?: string;
+  QualificationLevel?: string;
+  YearsExperience?: number;
 }
 
 // Alias for consistency with service layer
@@ -99,6 +114,14 @@ export interface D6Parent {
   Address: string;
   LearnerIDs: string[]; // Array of associated learner IDs
   IsPrimaryContact: boolean;
+  // Additional fields from D6 API
+  IdNumber?: string;
+  WorkPhone?: string;
+  HomePhone?: string;
+  Employer?: string;
+  Occupation?: string;
+  Title?: string;
+  Gender?: string;
 }
 
 // API Response wrappers
