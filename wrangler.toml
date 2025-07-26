@@ -1,0 +1,19 @@
+name = "espen-d6-mcp-remote"
+main = "src/cloudflare-worker-minimal.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+name = "espen-d6-mcp-remote"
+compatibility_date = "2024-07-22"
+
+# Environment variables for production
+# Set these using: wrangler secret put VARIABLE_NAME
+# Required secrets:
+# D6_API_USERNAME
+# D6_API_PASSWORD
+
+[vars]
+D6_API_BASE_URL = "https://integrate.d6plus.co.za/api/v2"
+D6_PRODUCTION_MODE = "true"
+NODE_ENV = "production" 
