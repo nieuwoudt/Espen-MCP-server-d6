@@ -275,6 +275,15 @@ function getLearnerSubjectsPerTermFromD6(
 }
 
 /**
+ * List all D6 client integrations for this integrator account
+ */
+async function getD6Clients(env: EnvLike): Promise<any> {
+  return d6Request(env, 'GET', '/v1/settings/clients', {
+    traceLabel: 'settings/clients',
+  });
+}
+
+/**
  * Enable D6 Client Integration for a school
  * Per Patrick's specification: use v1, PATCH, school_id in URL path (not body)
  */
@@ -791,6 +800,26 @@ const MCP_TOOLS = [
       required: ["school_login_id", "api_type_id"],
       additionalProperties: false
     }
+  },
+  {
+    name: "list_d6_schools",
+    description: "List all schools this Espen D6 integrator is configured for, optionally filtered to activated and/or whitelisted schools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        only_active: {
+          type: "boolean",
+          description: "If true, only include schools where activated_by_integrator === 'Yes'.",
+          default: true
+        },
+        only_whitelisted: {
+          type: "boolean",
+          description: "If true, only include schools in D6_ALLOWED_SCHOOL_LOGIN_IDS.",
+          default: true
+        }
+      },
+      additionalProperties: false
+    }
   }
 ];
 
@@ -1184,6 +1213,59 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
                `D6 Response: ${responseText}`;
       } catch (error) {
         return `❌ D6 API error while enabling client integration: ${formatD6Error(error)}`;
+      }
+    }
+
+    case 'list_d6_schools': {
+      const onlyActive = args?.only_active !== false; // default true
+      const onlyWhitelisted = args?.only_whitelisted !== false; // default true
+
+      try {
+        // Fetch all clients from D6
+        logToolInvocation('list_d6_schools', mockMode, { only_active: onlyActive, only_whitelisted: onlyWhitelisted });
+        const clients = await getD6Clients(env);
+        
+        if (!Array.isArray(clients) || clients.length === 0) {
+          return "ℹ️ No D6 clients were returned by /v1/settings/clients for this integrator account.";
+        }
+
+        // Derive whitelist from env
+        const allowedIds = parseAllowedSchools(env);
+
+        // Filter based on parameters
+        const filtered = clients.filter((c: any) => {
+          const id = Number(c.school_login_id);
+          if (onlyActive && String(c.activated_by_integrator) !== "Yes") return false;
+          if (onlyWhitelisted && allowedIds.length > 0 && !allowedIds.includes(id)) return false;
+          return true;
+        });
+
+        if (filtered.length === 0) {
+          return "ℹ️ No schools matched the filters (only_active / only_whitelisted). Try calling again with only_active=false or only_whitelisted=false if you want to see everything.";
+        }
+
+        // Build a compact summary (markdown table)
+        const rows = filtered.map((c: any) => {
+          const id = c.school_login_id;
+          const name = c.school_name || 'Unknown';
+          const apiType = c.api_type || 'Unknown';
+          const active = c.activated_by_integrator || 'Unknown';
+          return `| ${id} | ${name} | ${apiType} | ${active} |`;
+        });
+
+        const header = [
+          "📚 **D6 Schools for Espen Integrator**",
+          "",
+          `Showing ${filtered.length} of ${clients.length} schools (only_active=${onlyActive}, only_whitelisted=${onlyWhitelisted})`,
+          "",
+          "| school_login_id | school_name | api_type | activated_by_integrator |",
+          "|-----------------|-------------|----------|-------------------------|",
+          ...rows
+        ].join("\n");
+
+        return header;
+      } catch (error) {
+        return `❌ D6 API error while fetching schools list: ${formatD6Error(error)}`;
       }
     }
 
