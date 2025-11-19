@@ -1,17 +1,4 @@
 {
-  "version": 2,
-  "name": "espen-d6-mcp-server",
-  "buildCommand": "npm run build",
-  "functions": {
-    "api/mcp.ts": {
-      "runtime": "edge",
-      "maxDuration": 30
-    }
-  },
-  "env": {
-    "NODE_ENV": "production",
-    "ESPEN_ENV": "production"
-  },
   "rewrites": [
     {
       "source": "/mcp",
