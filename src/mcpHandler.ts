@@ -302,6 +302,57 @@ async function enableD6ClientIntegration(
   });
 }
 
+interface BulkActivationResult {
+  school_id: number;
+  school_name?: string;
+  success: boolean;
+  status?: number;
+  response?: any;
+  error?: string;
+}
+
+/**
+ * Bulk enable D6 client integrations for multiple schools
+ * Processes schools sequentially with rate limiting
+ */
+async function bulkEnableD6Schools(
+  env: EnvLike,
+  schoolIds: number[],
+  apiTypeId: number = 8,
+  state: 0 | 1 = 1
+): Promise<BulkActivationResult[]> {
+  const results: BulkActivationResult[] = [];
+  
+  for (const schoolId of schoolIds) {
+    const schoolName = getSchoolName(env, schoolId);
+    
+    try {
+      const response = await enableD6ClientIntegration(env, schoolId, apiTypeId, state);
+      results.push({
+        school_id: schoolId,
+        school_name: schoolName,
+        success: true,
+        status: 204, // Typical for PATCH with no content
+        response: response || 'No content',
+      });
+    } catch (error) {
+      results.push({
+        school_id: schoolId,
+        school_name: schoolName,
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    
+    // Rate limiting: 500ms delay between requests
+    if (schoolIds.indexOf(schoolId) < schoolIds.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+  }
+  
+  return results;
+}
+
 const formatD6Error = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
@@ -802,6 +853,37 @@ const MCP_TOOLS = [
     }
   },
   {
+    name: "bulk_enable_d6_schools",
+    description: "Enable D6 client integrations for multiple schools at once (batch activation). Processes schools sequentially with rate limiting.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_ids: {
+          type: "array",
+          items: { type: "integer" },
+          description: "Array of school login IDs to activate. If not provided, uses D6_ALLOWED_SCHOOL_LOGIN_IDS."
+        },
+        api_type_id: {
+          type: "integer",
+          description: "The D6 API type ID (e.g., 8 for Integrate API)",
+          default: 8
+        },
+        state: {
+          type: "integer",
+          description: "State: 1 = enabled, 0 = disabled",
+          enum: [0, 1],
+          default: 1
+        },
+        use_whitelist: {
+          type: "boolean",
+          description: "If true and school_login_ids not provided, activates all schools from D6_ALLOWED_SCHOOL_LOGIN_IDS",
+          default: true
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  {
     name: "list_d6_schools",
     description: "List all schools this Espen D6 integrator is configured for, optionally filtered to activated and/or whitelisted schools.",
     inputSchema: {
@@ -1213,6 +1295,75 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
                `D6 Response: ${responseText}`;
       } catch (error) {
         return `❌ D6 API error while enabling client integration: ${formatD6Error(error)}`;
+      }
+    }
+
+    case 'bulk_enable_d6_schools': {
+      if (mockMode) {
+        return '⚠️ `bulk_enable_d6_schools` should not be used in mock mode. This is a production admin operation.';
+      }
+
+      const apiTypeId = Number(args?.api_type_id ?? 8);
+      const state = Number(args?.state ?? 1) as 0 | 1;
+      const useWhitelist = args?.use_whitelist !== false; // default true
+
+      let schoolIds: number[];
+      
+      // Determine which schools to activate
+      if (args?.school_login_ids && Array.isArray(args.school_login_ids)) {
+        schoolIds = args.school_login_ids.map(Number);
+      } else if (useWhitelist) {
+        schoolIds = parseAllowedSchools(env);
+        if (schoolIds.length === 0) {
+          return '❌ No schools in D6_ALLOWED_SCHOOL_LOGIN_IDS. Please provide school_login_ids array or configure the whitelist.';
+        }
+      } else {
+        return '❌ Either provide school_login_ids array or set use_whitelist=true';
+      }
+
+      try {
+        logToolInvocation('bulk_enable_d6_schools', mockMode, { 
+          count: schoolIds.length,
+          api_type_id: apiTypeId,
+          state,
+          use_whitelist: useWhitelist
+        });
+
+        console.log(`[BULK ACTIVATION] Starting activation for ${schoolIds.length} schools...`);
+        
+        const results = await bulkEnableD6Schools(env, schoolIds, apiTypeId, state);
+        
+        const successful = results.filter(r => r.success).length;
+        const failed = results.filter(r => !r.success).length;
+
+        // Build results table
+        const rows = results.map((r) => {
+          const statusIcon = r.success ? '✅' : '❌';
+          const statusText = r.success ? 'Success' : 'Failed';
+          const details = r.success 
+            ? (r.response === 'No content' || r.response === null ? '204 No Content' : '200 OK')
+            : (r.error || 'Unknown error');
+          return `| ${r.school_id} | ${r.school_name || 'Unknown'} | ${statusIcon} ${statusText} | ${details} |`;
+        });
+
+        const summary = [
+          `✅ **Bulk D6 School Activation ${state === 1 ? 'Enabled' : 'Disabled'}**`,
+          "",
+          `**Summary:**`,
+          `- Processed: ${results.length} schools`,
+          `- Successful: ${successful}`,
+          `- Failed: ${failed}`,
+          "",
+          "| School ID | School Name | Status | Response |",
+          "|-----------|-------------|--------|----------|",
+          ...rows,
+        ].join("\n");
+
+        console.log(`[BULK ACTIVATION] Complete: ${successful}/${results.length} successful`);
+        
+        return summary;
+      } catch (error) {
+        return `❌ Bulk activation error: ${formatD6Error(error)}`;
       }
     }
 
