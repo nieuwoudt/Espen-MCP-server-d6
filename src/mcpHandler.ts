@@ -150,16 +150,35 @@ async function d6Request<T>(
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
+  // Always read response as text first to handle empty bodies safely
+  const rawText = await response.text().catch(() => '');
+  
+  // Enhanced logging with body content
   if (options.traceLabel) {
-    console.log(`[D6 TRACE] ${method} ${url.pathname}${url.search} -> ${response.status} (${options.traceLabel})`);
+    const bodyPreview = rawText ? (rawText.length > 100 ? rawText.substring(0, 100) + '...' : rawText) : '<empty>';
+    console.log(`[D6 TRACE] ${method} ${url.pathname}${url.search} -> ${response.status} (${options.traceLabel}) body=${bodyPreview}`);
   }
 
+  // Parse response data if present
+  let parsed: any = null;
+  if (rawText && rawText.trim().length > 0) {
+    try {
+      parsed = JSON.parse(rawText);
+    } catch {
+      // Not valid JSON, return raw text
+      parsed = rawText;
+    }
+  }
+
+  // Handle errors
   if (!response.ok) {
-    const text = await response.text().catch(() => '');
-    throw new Error(`D6 error ${response.status}: ${text || response.statusText}`);
+    const errorMsg = typeof parsed === 'string' ? parsed : JSON.stringify(parsed || response.statusText);
+    throw new Error(`D6 error ${response.status} on ${method} ${path}: ${errorMsg}`);
   }
 
-  return (await response.json()) as T;
+  // For successful responses (including 204 No Content), return data
+  // If body is empty (204 or empty 200), parsed will be null - that's expected
+  return parsed as T;
 }
 
 function getSchoolInfoByLoginId(env: EnvLike, loginId: number, traceLabel = 'school') {
@@ -1078,11 +1097,16 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
         
         const result = await enableD6ClientIntegration(env, targetSchoolId, apiTypeId, state);
         
+        // Handle empty responses (204 No Content) or null data
+        const responseText = result 
+          ? (typeof result === 'string' ? result : JSON.stringify(result, null, 2))
+          : '(No content - successful 204 response)';
+        
         return `✅ **D6 Client Integration ${state === 1 ? 'Enabled' : 'Disabled'}**\n\n` +
                `School: ${targetSchoolName || targetSchoolId}\n` +
                `API Type ID: ${apiTypeId}\n` +
                `State: ${state}\n\n` +
-               `Response:\n${JSON.stringify(result, null, 2)}`;
+               `D6 Response: ${responseText}`;
       } catch (error) {
         return `❌ D6 API error while enabling client integration: ${formatD6Error(error)}`;
       }
