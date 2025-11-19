@@ -246,6 +246,34 @@ function getLearnerMarksFromD6(
   });
 }
 
+function getLearnerSubjectsFromD6(
+  env: EnvLike,
+  loginId: number,
+  learnerId: string | number,
+  traceLabel = 'learner_subjects'
+) {
+  return d6Request(env, 'GET', `/v1/currplus/learnersubjects/${loginId}`, {
+    query: {
+      learner_id: learnerId,
+    },
+    traceLabel: `${traceLabel}/${loginId}?learner_id=${learnerId}`,
+  });
+}
+
+function getLearnerSubjectsPerTermFromD6(
+  env: EnvLike,
+  loginId: number,
+  learnerId: string | number,
+  traceLabel = 'learner_subjects_per_term'
+) {
+  return d6Request(env, 'GET', `/v1/currplus/learnersubjectsperterm/${loginId}`, {
+    query: {
+      learner_id: learnerId,
+    },
+    traceLabel: `${traceLabel}/${loginId}?learner_id=${learnerId}`,
+  });
+}
+
 /**
  * Enable D6 Client Integration for a school
  * Per Patrick's specification: use v1, PATCH, school_id in URL path (not body)
@@ -595,11 +623,37 @@ const MCP_TOOLS = [
   },
   {
     name: "get_learner_marks",
-    description: "Get academic marks for a specific learner",
+    description: "Get academic marks for a specific learner from Curriculum+ (learnersubjectmarks endpoint)",
     inputSchema: {
       type: "object",
       properties: {
         learnerId: { type: "string", description: "The ID of the learner to get marks for" },
+        school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
+      },
+      required: ["learnerId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learner_subjects",
+    description: "Get all subjects for a specific learner from Curriculum+ (learnersubjects endpoint)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        learnerId: { type: "string", description: "The ID of the learner to get subjects for" },
+        school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
+      },
+      required: ["learnerId"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learner_subjects_per_term",
+    description: "Get subject marks per term for a specific learner from Curriculum+ (learnersubjectsperterm endpoint)",
+    inputSchema: {
+      type: "object",
+      properties: {
+        learnerId: { type: "string", description: "The ID of the learner to get term-based subject data for" },
         school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
       },
       required: ["learnerId"],
@@ -829,23 +883,44 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
       if (!learnerId) {
         throw new Error('learnerId parameter is required');
       }
-      if (!mockMode) {
-        try {
-          logToolInvocation('get_learner_marks', mockMode, { school_login_id: schoolLoginId, school_name: schoolName, learnerId });
-          const data = await getLearnerMarksFromD6(env, schoolLoginId, learnerId, 'get_learner_marks');
-          return `📊 **Academic Marks for Learner ${learnerId} (D6)** - School: ${schoolName || schoolLoginId}\n\n${JSON.stringify(data, null, 2)}`;
-        } catch (error) {
-          return `❌ D6 API error while fetching learner marks: ${formatD6Error(error)}`;
-        }
+      // D6 has enabled Curriculum+ - always use real data (no mock fallback)
+      try {
+        logToolInvocation('get_learner_marks', mockMode, { school_login_id: schoolLoginId, school_name: schoolName, learnerId });
+        const data = await getLearnerMarksFromD6(env, schoolLoginId, learnerId, 'get_learner_marks');
+        return `📊 **Academic Marks for Learner ${learnerId} (D6 Curriculum+)** - School: ${schoolName || schoolLoginId}\n\n${JSON.stringify(data, null, 2)}`;
+      } catch (error) {
+        return `❌ D6 API error while fetching learner marks: ${formatD6Error(error)}`;
       }
-      const marksMockData = generateComprehensiveMockData();
-      const learnerMarks = marksMockData.marks.filter((mark: any) =>
-        mark.LearnerID === learnerId.toString()
-      );
-      if (learnerMarks.length === 0) {
-        return `📊 **Academic Marks for Learner ${learnerId}** - No marks found for this learner ID`;
+    }
+
+    case 'get_learner_subjects': {
+      const learnerId = args.learnerId;
+      if (!learnerId) {
+        throw new Error('learnerId parameter is required');
       }
-      return `📊 **Academic Marks for Learner ${learnerId}** (Mock Data - ${learnerMarks.length} total records)\n\n${JSON.stringify(learnerMarks.slice(0, 20), null, 2)}`;
+      // D6 has enabled Curriculum+ - always use real data
+      try {
+        logToolInvocation('get_learner_subjects', mockMode, { school_login_id: schoolLoginId, school_name: schoolName, learnerId });
+        const data = await getLearnerSubjectsFromD6(env, schoolLoginId, learnerId, 'get_learner_subjects');
+        return `📚 **Subjects for Learner ${learnerId} (D6 Curriculum+)** - School: ${schoolName || schoolLoginId}\n\n${JSON.stringify(data, null, 2)}`;
+      } catch (error) {
+        return `❌ D6 API error while fetching learner subjects: ${formatD6Error(error)}`;
+      }
+    }
+
+    case 'get_learner_subjects_per_term': {
+      const learnerId = args.learnerId;
+      if (!learnerId) {
+        throw new Error('learnerId parameter is required');
+      }
+      // D6 has enabled Curriculum+ - always use real data
+      try {
+        logToolInvocation('get_learner_subjects_per_term', mockMode, { school_login_id: schoolLoginId, school_name: schoolName, learnerId });
+        const data = await getLearnerSubjectsPerTermFromD6(env, schoolLoginId, learnerId, 'get_learner_subjects_per_term');
+        return `📅 **Subjects Per Term for Learner ${learnerId} (D6 Curriculum+)** - School: ${schoolName || schoolLoginId}\n\n${JSON.stringify(data, null, 2)}`;
+      } catch (error) {
+        return `❌ D6 API error while fetching learner subjects per term: ${formatD6Error(error)}`;
+      }
     }
 
     case 'get_lookup_data':
