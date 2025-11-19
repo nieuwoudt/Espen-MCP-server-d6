@@ -227,6 +227,25 @@ function getLearnerMarksFromD6(
   });
 }
 
+/**
+ * Enable D6 Client Integration for a school
+ * Per Patrick's specification: use v1, PATCH, school_id in URL path (not body)
+ */
+async function enableD6ClientIntegration(
+  env: EnvLike,
+  schoolId: number,
+  apiTypeId: number,
+  state: 0 | 1 = 1
+): Promise<any> {
+  return d6Request(env, 'PATCH', `/v1/settings/clients/${schoolId}`, {
+    body: {
+      api_type_id: apiTypeId,
+      state,
+    },
+    traceLabel: `settings/clients/${schoolId} [api_type_id=${apiTypeId}, state=${state}]`,
+  });
+}
+
 const formatD6Error = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
 
@@ -674,6 +693,31 @@ const MCP_TOOLS = [
       required: ["school_login_id"],
       additionalProperties: false
     }
+  },
+  {
+    name: "enable_d6_client",
+    description: "Enable/configure a D6 API client integration for a school via v1/settings/clients. This is an admin operation to activate D6 features like marks access.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_id: { 
+          type: "integer", 
+          description: "The D6 school_login_id to enable" 
+        },
+        api_type_id: { 
+          type: "integer", 
+          description: "The D6 API type ID (e.g., 8 for Integrate API)" 
+        },
+        state: { 
+          type: "integer", 
+          description: "State: 1 = enabled, 0 = disabled",
+          enum: [0, 1],
+          default: 1
+        }
+      },
+      required: ["school_login_id", "api_type_id"],
+      additionalProperties: false
+    }
   }
 ];
 
@@ -1005,6 +1049,42 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
         return JSON.stringify(data, null, 2);
       } catch (error) {
         return `❌ D6 API error while fetching learners: ${formatD6Error(error)}`;
+      }
+    }
+
+    case 'enable_d6_client': {
+      if (mockMode) {
+        return '⚠️ `enable_d6_client` should not be used in mock mode. This is a production admin operation.';
+      }
+      
+      const targetSchoolId = Number(args?.school_login_id || args?.schoolId);
+      const apiTypeId = Number(args?.api_type_id);
+      const state = Number(args?.state ?? 1) as 0 | 1;
+      
+      if (!targetSchoolId || !apiTypeId) {
+        return '❌ Missing required parameters: school_login_id and api_type_id are required';
+      }
+      
+      try {
+        assertSchoolAllowed(env, targetSchoolId);
+        const targetSchoolName = getSchoolName(env, targetSchoolId);
+        
+        logToolInvocation('enable_d6_client', mockMode, { 
+          school_login_id: targetSchoolId, 
+          school_name: targetSchoolName,
+          api_type_id: apiTypeId,
+          state 
+        });
+        
+        const result = await enableD6ClientIntegration(env, targetSchoolId, apiTypeId, state);
+        
+        return `✅ **D6 Client Integration ${state === 1 ? 'Enabled' : 'Disabled'}**\n\n` +
+               `School: ${targetSchoolName || targetSchoolId}\n` +
+               `API Type ID: ${apiTypeId}\n` +
+               `State: ${state}\n\n` +
+               `Response:\n${JSON.stringify(result, null, 2)}`;
+      } catch (error) {
+        return `❌ D6 API error while enabling client integration: ${formatD6Error(error)}`;
       }
     }
 

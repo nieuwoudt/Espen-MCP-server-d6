@@ -264,22 +264,34 @@ export class D6ApiServiceV2 {
   }
 
   /**
-   * Activate/deactivate integration for a specific school
+   * @deprecated INCORRECT IMPLEMENTATION - DO NOT USE
+   * Per Patrick's spec, must use:
+   * - PATCH (not POST)
+   * - v1 (not v2)
+   * - school_id in URL path: /v1/settings/clients/{school_id}
+   * - body should NOT include school_login_id
+   * 
+   * Use enableD6ClientIntegration from mcpHandler.ts instead
    */
   async updateClientIntegrationState(
     schoolLoginId: string, 
     apiTypeId: string, 
     state: boolean
   ): Promise<D6ApiResponse<D6ClientIntegration>> {
-    const data = {
-      school_login_id: schoolLoginId,
-      api_type_id: apiTypeId,
-      state: state ? 1 : 0,
-    };
-
-    return this.makeRequest<D6ClientIntegration>('POST', 'settings/clients', data, {
-      cache: false, // Don't cache state changes
-    });
+    throw new Error(
+      'updateClientIntegrationState is deprecated. ' +
+      'Use enableD6ClientIntegration from mcpHandler.ts with correct v1 PATCH endpoint.'
+    );
+    
+    // OLD INCORRECT IMPLEMENTATION (kept for reference):
+    // const data = {
+    //   school_login_id: schoolLoginId, // ❌ Should NOT be in body
+    //   api_type_id: apiTypeId,
+    //   state: state ? 1 : 0,
+    // };
+    // return this.makeRequest<D6ClientIntegration>('POST', 'settings/clients', data, {
+    //   cache: false,
+    // });
   }
 
   // ====================
