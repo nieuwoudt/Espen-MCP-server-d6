@@ -217,9 +217,9 @@ function getLearnerMarksFromD6(
   env: EnvLike,
   loginId: number,
   learnerId: string | number,
-  traceLabel = 'assessments'
+  traceLabel = 'learner_subject_marks'
 ) {
-  return d6Request(env, 'GET', `/v1/adminplus/assessments/${loginId}`, {
+  return d6Request(env, 'GET', `/v1/currplus/learnersubjectmarks/${loginId}`, {
     query: {
       learner_id: learnerId,
     },
