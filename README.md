@@ -92,13 +92,18 @@ Once connected, try these in Claude:
 ✅ "Check system health"
 ```
 
+### ⚙️ **Environment Highlights**
+- `D6_API_USERNAME` / `D6_API_PASSWORD`: single integrator login shared across schools.
+- `D6_MONUMENTPARK_SCHOOL_LOGIN_ID`: defaults to `1352` (Laerskool Monumentpark).
+- `D6_MOCK_MODE`: set `false` for production (real D6 data) or `true` for local/mock demos.
+
 ---
 
 ## 📊 **COMPLETE DATASET**
 
-### 👨‍🎓 **Students (1,270+ Records)**
-- **All grades**: 1-12 with authentic South African names
-- **11 languages**: Afrikaans, English, Zulu, Setswana, Xhosa, Sesotho, Sepedi, Tsonga, Venda, Ndebele, Swati
+### 👨‍🎓 **Students (1,270 Records)**
+- **Grades 1-7**: Scoped to Laerskool Monumentpark (primary school focus)
+- **Languages**: Afrikaans, English, Zulu, Setswana, Sesotho (configurable per school profile)
 - **Complete demographics**: Grade placement, class assignments, contact details
 - **Academic structure**: Term-based assessment system
 
@@ -108,7 +113,7 @@ Once connected, try these in Claude:
 - **Subject specializations**: Grade-appropriate curriculum coverage
 - **Contact information**: Professional email and phone systems
 
-### 👪 **Parents (1,523+ Records)**
+### 👪 **Parents (~2,300 Records)**
 - **Linked relationships**: Parent-child connections with relationship types
 - **Contact details**: Email, phone, physical addresses
 - **Communication preferences**: Primary and secondary contacts

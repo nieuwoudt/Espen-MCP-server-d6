@@ -14,6 +14,6 @@ compatibility_date = "2024-07-22"
 # D6_API_PASSWORD
 
 [vars]
-D6_API_BASE_URL = "https://integrate.d6plus.co.za/api/v2"
+D6_API_BASE_URL = "https://integrate.d6plus.co.za/api"
 D6_PRODUCTION_MODE = "true"
-NODE_ENV = "production" 
+NODE_ENV = "production"

@@ -27,22 +27,39 @@ async function testMCPServer() {
     let serverReady = false;
     let testsPassed = 0;
     const totalTests = 3;
+    const readySignals = [
+      'Espen D6 MCP Server running',
+      'Starting Espen D6 MCP Server'
+    ];
+
+    const markServerReady = (signalSource: string) => {
+      if (serverReady) {
+        return;
+      }
+
+      serverReady = true;
+      console.log(`✅ MCP server signaled readiness (${signalSource})\n`);
+      runTests();
+    };
 
     // Monitor server output
     mcpServer.stdout.on('data', (data) => {
       const output = data.toString();
       console.log('📤 Server output:', output.trim());
-      
-      if (output.includes('Espen D6 MCP Server running')) {
-        serverReady = true;
-        console.log('✅ MCP server started successfully\n');
-        runTests();
+
+      if (readySignals.some((pattern) => output.includes(pattern))) {
+        markServerReady('stdout');
       }
     });
 
     mcpServer.stderr.on('data', (data) => {
       const error = data.toString();
-      console.log('❌ Server error:', error.trim());
+      if (readySignals.some((pattern) => error.includes(pattern))) {
+        markServerReady('stderr');
+        return;
+      }
+
+      console.log('📥 Server log (stderr):', error.trim());
     });
 
     mcpServer.on('error', (error) => {
@@ -50,14 +67,18 @@ async function testMCPServer() {
       reject(error);
     });
 
-    mcpServer.on('close', (code) => {
-      if (code === 0 && testsPassed === totalTests) {
+    mcpServer.on('close', (code, signal) => {
+      if (testsPassed === totalTests) {
         console.log('\n✅ All MCP tests passed!');
+        if (signal) {
+          console.log(`ℹ️ Server stopped via ${signal}`);
+        }
         resolve();
-      } else {
-        console.log(`\n❌ MCP server exited with code ${code}`);
-        reject(new Error(`Server exited with code ${code}`));
+        return;
       }
+
+      console.log(`\n❌ MCP server exited unexpectedly with code ${code}${signal ? ` (signal ${signal})` : ''}`);
+      reject(new Error(`Server exited with code ${code}`));
     });
 
     // Test MCP protocol messages
@@ -119,6 +140,14 @@ async function testMCPServer() {
         }, 1000);
       }, 1000);
     }
+
+    // Fallback: if no readiness signal, start tests after grace period
+    setTimeout(() => {
+      if (!serverReady) {
+        console.log('⚠️ No readiness signal detected, proceeding with tests after 5s grace period.');
+        markServerReady('timeout fallback');
+      }
+    }, 5000);
 
     // Timeout after 30 seconds
     setTimeout(() => {
