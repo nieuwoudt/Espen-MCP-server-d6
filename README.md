@@ -51,6 +51,7 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 | `get_staff` | Staff directory | 77+ records | ✅ Working |
 | `get_parents` | Parent information | 1,523+ records | ✅ Working |
 | `get_learner_marks` | Academic records | Per student | ✅ Working |
+| `get_all_marks` / `get_all_subjects` | Curriculum+ bulk | Deterministic guard | ⚠️ Returns `CURRPLUS_BULK_NOT_SUPPORTED` until D6 confirms bulk routes; if Curriculum+ is not enabled for a school, returns `{"data":[],"meta":{"module_enabled":false}}`. Consumers (e.g., sync worker) should fan out per-learner with concurrency caps when bulk is not available. |
 
 ### 🔧 **System Tools**
 | Tool | Purpose | Output | Status |

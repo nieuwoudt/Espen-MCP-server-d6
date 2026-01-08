@@ -1,0 +1,30 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist-vercel",
+    "skipLibCheck": true
+  },
+  "include": [
+    "api/mcp.ts",
+    "src/mcpHandler.ts",
+    "src/types/**/*.ts",
+    "src/utils/**/*.ts"
+  ],
+  "exclude": [
+    "dist",
+    "scripts/**/*",
+    "src/index*.ts",
+    "src/mcp-server*.ts",
+    "src/cloudflare-worker*.ts",
+    "src/api/context.ts",
+    "src/db/**/*",
+    "src/services/**/*",
+    "src/middleware/**/*",
+    "**/*.test.ts",
+    "**/*.spec.ts",
+    ".tmp-mcp-check.ts",
+    "node_modules"
+  ]
+}
+

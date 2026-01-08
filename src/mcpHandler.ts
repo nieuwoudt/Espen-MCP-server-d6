@@ -274,6 +274,126 @@ function getLearnerSubjectsPerTermFromD6(
   });
 }
 
+interface CurrPlusAvailabilityCacheEntry {
+  status: 'enabled' | 'disabled' | 'no_learners' | 'error';
+  message?: string;
+  expiresAt: number;
+}
+
+const currPlusAvailabilityCache = new Map<number, CurrPlusAvailabilityCacheEntry>();
+
+async function checkCurrPlusAvailability(
+  env: EnvLike,
+  schoolLoginId: number,
+  mockMode: boolean
+): Promise<CurrPlusAvailabilityCacheEntry> {
+  if (mockMode) {
+    return { status: 'enabled', expiresAt: Date.now() + 15 * 60 * 1000 };
+  }
+
+  const cached = currPlusAvailabilityCache.get(schoolLoginId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached;
+  }
+
+  // Fetch one learner to probe Curriculum+ availability
+  try {
+    const learnerResp = await getLearnersByLoginId(env, schoolLoginId, { limit: 1 }, 'currplus_probe_learners');
+    const learners = extractItemsFromD6Response(learnerResp);
+    const sample = learners[0];
+    const learnerId =
+      sample?.LearnerID ||
+      sample?.learner_id ||
+      sample?.learnerId ||
+      sample?.id ||
+      sample?.ID;
+
+    if (!learnerId) {
+      const entry = {
+        status: 'no_learners' as const,
+        message: 'Unable to probe Curriculum+ availability: no learner_id found from AdminPlus learners.',
+        expiresAt: Date.now() + 15 * 60 * 1000,
+      };
+      currPlusAvailabilityCache.set(schoolLoginId, entry);
+      return entry;
+    }
+
+    try {
+      await getLearnerMarksFromD6(env, schoolLoginId, learnerId, 'currplus_probe_marks');
+      const entry = { status: 'enabled' as const, expiresAt: Date.now() + 15 * 60 * 1000 };
+      currPlusAvailabilityCache.set(schoolLoginId, entry);
+      return entry;
+    } catch (err: any) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message.toLowerCase().includes('404') || message.toLowerCase().includes('route_not_found')) {
+        const entry = {
+          status: 'disabled' as const,
+          message: 'Curriculum+ module not enabled for this school (route_not_found).',
+          expiresAt: Date.now() + 15 * 60 * 1000,
+        };
+        currPlusAvailabilityCache.set(schoolLoginId, entry);
+        return entry;
+      }
+      const entry = {
+        status: 'error' as const,
+        message,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      };
+      currPlusAvailabilityCache.set(schoolLoginId, entry);
+      return entry;
+    }
+  } catch (err: any) {
+    const entry = {
+      status: 'error' as const,
+      message: err instanceof Error ? err.message : String(err),
+      expiresAt: Date.now() + 5 * 60 * 1000,
+    };
+    currPlusAvailabilityCache.set(schoolLoginId, entry);
+    return entry;
+  }
+}
+
+interface BulkPaginationParams {
+  limit?: number;
+  cursor?: string;
+  term?: number;
+  academic_year?: number;
+  subject_id?: string | number;
+}
+
+function getAllSubjectsFromD6(
+  env: EnvLike,
+  loginId: number,
+  params: BulkPaginationParams = {},
+  traceLabel = 'subjects_bulk'
+) {
+  return d6Request(env, 'GET', `/v1/currplus/subjects/${loginId}`, {
+    query: {
+      limit: params.limit,
+      cursor: params.cursor,
+    },
+    traceLabel: `${traceLabel}/${loginId}`,
+  });
+}
+
+function getAllLearnerSubjectMarksFromD6(
+  env: EnvLike,
+  loginId: number,
+  params: BulkPaginationParams = {},
+  traceLabel = 'learner_subject_marks_bulk'
+) {
+  return d6Request(env, 'GET', `/v1/currplus/learnersubjectmarks/${loginId}`, {
+    query: {
+      limit: params.limit,
+      cursor: params.cursor,
+      term: params.term,
+      academic_year: params.academic_year,
+      subject_id: params.subject_id,
+    },
+    traceLabel: `${traceLabel}/${loginId}`,
+  });
+}
+
 /**
  * List all D6 client integrations for this integrator account
  */
@@ -370,6 +490,14 @@ function extractItemsFromD6Response(data: any): any[] {
     return data.results;
   }
   return [];
+}
+
+function buildBulkResponse<T>(payload: T, includeMeta?: boolean): string {
+  const response: Record<string, unknown> = { data: payload };
+  if (includeMeta) {
+    response.meta = { synced_at: new Date().toISOString() };
+  }
+  return JSON.stringify(response, null, 2);
 }
 
 const logToolInvocation = (
@@ -756,6 +884,36 @@ const MCP_TOOLS = [
       type: "object",
       properties: {
         schoolId: { type: "string", description: "Optional school ID to filter learners" },
+        school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_all_subjects",
+    description: "Bulk: Curriculum+ subjects for a school (paged, tenant-scoped).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", description: "Max records per page (default 200, max 1000)" },
+        cursor: { type: "string", description: "Pagination cursor from previous page" },
+        include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
+        school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_all_marks",
+    description: "Bulk: Curriculum+ learner subject marks (paged, tenant-scoped) with optional term/year filters.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "integer", description: "Max records per page (default 200, max 1000)" },
+        cursor: { type: "string", description: "Pagination cursor from previous page" },
+        term: { type: "integer", description: "Optional term filter (1-4)" },
+        academic_year: { type: "integer", description: "Optional academic year filter (e.g., 2024)" },
+        include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
         school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
       },
       additionalProperties: false
@@ -1153,6 +1311,90 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
       const mockDataForGrade = generateComprehensiveMockData();
       const filteredByGrade = mockDataForGrade.learners.filter((learner) => learner.Grade === targetGrade);
       return `🎯 **Grade ${targetGrade} Learners** (${filteredByGrade.length} found from ${mockDataForGrade.learners.length} total)\n\n${JSON.stringify(filteredByGrade, null, 2)}\n\n✅ **Complete grade ${targetGrade} results**`;
+    }
+
+    case 'get_all_subjects': {
+      const availability = await checkCurrPlusAvailability(env, schoolLoginId, mockMode);
+      if (availability.status === 'disabled') {
+        return buildBulkResponse({ items: [], next_cursor: null, total: 0 }, true).replace(
+          '"synced_at"',
+          '"module_enabled":false,"synced_at"'
+        );
+      }
+      if (availability.status === 'no_learners') {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_PROBE_NO_LEARNERS',
+          message: availability.message || 'Unable to determine Curriculum+ availability: no learners found.',
+        }, null, 2);
+      }
+      if (availability.status === 'error') {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_PROBE_FAILED',
+          message: availability.message || 'Curriculum+ availability probe failed.',
+        }, null, 2);
+      }
+
+      const limit = Math.min(parseInt(args?.limit ?? '200', 10), 1000);
+      const cursor = args?.cursor;
+      const includeMeta = args?.include_meta === true;
+      if (!mockMode) {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_BULK_NOT_SUPPORTED',
+          message: 'Bulk Curriculum+ subjects endpoint is not available; module appears enabled but bulk route is unknown.',
+        }, null, 2);
+      }
+      const offset = parseInt(cursor || '0', 10);
+      const slice = MOCK_SCHOOL_DATA.subjects.slice(offset, offset + limit);
+      const nextCursor = offset + limit < MOCK_SCHOOL_DATA.subjects.length ? String(offset + limit) : null;
+      const payload = {
+        items: slice,
+        next_cursor: nextCursor,
+        total: MOCK_SCHOOL_DATA.subjects.length
+      };
+      return buildBulkResponse(payload, includeMeta);
+    }
+
+    case 'get_all_marks': {
+      const availability = await checkCurrPlusAvailability(env, schoolLoginId, mockMode);
+      if (availability.status === 'disabled') {
+        return buildBulkResponse({ items: [], next_cursor: null, total: 0 }, true).replace(
+          '"synced_at"',
+          '"module_enabled":false,"synced_at"'
+        );
+      }
+      if (availability.status === 'no_learners') {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_PROBE_NO_LEARNERS',
+          message: availability.message || 'Unable to determine Curriculum+ availability: no learners found.',
+        }, null, 2);
+      }
+      if (availability.status === 'error') {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_PROBE_FAILED',
+          message: availability.message || 'Curriculum+ availability probe failed.',
+        }, null, 2);
+      }
+
+      const limit = Math.min(parseInt(args?.limit ?? '200', 10), 1000);
+      const cursor = args?.cursor;
+      const includeMeta = args?.include_meta === true;
+      const term = args?.term ? Number(args.term) : undefined;
+      const academicYear = args?.academic_year ? Number(args.academic_year) : undefined;
+      if (!mockMode) {
+        return JSON.stringify({
+          error_code: 'CURRPLUS_BULK_NOT_SUPPORTED',
+          message: 'Bulk Curriculum+ marks endpoint is not available; module appears enabled but bulk route is unknown.',
+        }, null, 2);
+      }
+      const offset = parseInt(cursor || '0', 10);
+      const slice = MOCK_SCHOOL_DATA.marks.slice(offset, offset + limit);
+      const nextCursor = offset + limit < MOCK_SCHOOL_DATA.marks.length ? String(offset + limit) : null;
+      const payload = {
+        items: slice,
+        next_cursor: nextCursor,
+        total: MOCK_SCHOOL_DATA.marks.length
+      };
+      return buildBulkResponse(payload, includeMeta);
     }
 
     case 'get_data_summary': {
@@ -1639,3 +1881,4 @@ export async function handleMcpRequest(request: Request, env: EnvLike): Promise<
   });
 }
 
+export { handleToolCall };
