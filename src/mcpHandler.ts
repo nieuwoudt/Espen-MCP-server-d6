@@ -553,14 +553,20 @@ const logToolInvocation = (
   console.log(`[TOOL] ${toolName} mock=${mockMode}${suffix}`);
 };
 
+
 function isBulkRouteUnsupported(error: unknown): boolean {
   const message = formatD6Error(error).toLowerCase();
   return (
     message.includes('route_not_found') ||
     message.includes('unknown route') ||
     message.includes('not found') ||
-    message.includes('404')
+    message.includes('404') ||
+    (message.includes('please specify') && message.includes('learner_id')) ||
+    (message.includes('learner_id') &&
+      (message.includes('required') || message.includes('missing')))
   );
+
+  
 }
 
 // Comprehensive Mock Data Generator
