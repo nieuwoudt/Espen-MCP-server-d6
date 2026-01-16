@@ -232,15 +232,25 @@ function getParentsByLoginId(
   });
 }
 
+interface LearnerMarksQueryParams {
+  term?: number;
+  academic_year?: number;
+  subject_id?: string | number;
+}
+
 function getLearnerMarksFromD6(
   env: EnvLike,
   loginId: number,
   learnerId: string | number,
-  traceLabel = 'learner_subject_marks'
+  traceLabel = 'learner_subject_marks',
+  params: LearnerMarksQueryParams = {}
 ) {
   return d6Request(env, 'GET', `/v1/currplus/learnersubjectmarks/${loginId}`, {
     query: {
       learner_id: learnerId,
+      term: params.term,
+      academic_year: params.academic_year,
+      subject_id: params.subject_id,
     },
     traceLabel: `${traceLabel}/${loginId}?learner_id=${learnerId}`,
   });
@@ -301,12 +311,7 @@ async function checkCurrPlusAvailability(
     const learnerResp = await getLearnersByLoginId(env, schoolLoginId, { limit: 1 }, 'currplus_probe_learners');
     const learners = extractItemsFromD6Response(learnerResp);
     const sample = learners[0];
-    const learnerId =
-      sample?.LearnerID ||
-      sample?.learner_id ||
-      sample?.learnerId ||
-      sample?.id ||
-      sample?.ID;
+    const learnerId = extractLearnerId(sample);
 
     if (!learnerId) {
       const entry = {
@@ -492,6 +497,45 @@ function extractItemsFromD6Response(data: any): any[] {
   return [];
 }
 
+function extractLearnerId(learner: any): string | number | undefined {
+  return (
+    learner?.LearnerID ||
+    learner?.learner_id ||
+    learner?.learnerId ||
+    learner?.id ||
+    learner?.ID
+  );
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, timeoutLabel: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`Timeout after ${timeoutMs}ms (${timeoutLabel})`)), timeoutMs)
+    ),
+  ]);
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length);
+  let nextIndex = 0;
+
+  async function runWorker(): Promise<void> {
+    while (nextIndex < items.length) {
+      const current = nextIndex++;
+      results[current] = await worker(items[current], current);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, () => runWorker());
+  await Promise.all(workers);
+  return results;
+}
+
 function buildBulkResponse<T>(payload: T, includeMeta?: boolean): string {
   const response: Record<string, unknown> = { data: payload };
   if (includeMeta) {
@@ -508,6 +552,16 @@ const logToolInvocation = (
   const suffix = details ? ` details=${JSON.stringify(details)}` : '';
   console.log(`[TOOL] ${toolName} mock=${mockMode}${suffix}`);
 };
+
+function isBulkRouteUnsupported(error: unknown): boolean {
+  const message = formatD6Error(error).toLowerCase();
+  return (
+    message.includes('route_not_found') ||
+    message.includes('unknown route') ||
+    message.includes('not found') ||
+    message.includes('404')
+  );
+}
 
 // Comprehensive Mock Data Generator
 function generateComprehensiveMockData() {
@@ -895,7 +949,7 @@ const MCP_TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        limit: { type: "integer", description: "Max records per page (default 200, max 1000)" },
+        limit: { type: "integer", description: "Bulk: max marks per page (default 200, max 1000). Fallback: max learners per page (default 25, max 50)." },
         cursor: { type: "string", description: "Pagination cursor from previous page" },
         include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
         school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
@@ -905,7 +959,7 @@ const MCP_TOOLS = [
   },
   {
     name: "get_all_marks",
-    description: "Bulk: Curriculum+ learner subject marks (paged, tenant-scoped) with optional term/year filters.",
+    description: "Bulk: Curriculum+ learner subject marks (paged, tenant-scoped) with optional term/year filters. Optional guarded fallback can fan out per-learner when bulk is unavailable.",
     inputSchema: {
       type: "object",
       properties: {
@@ -914,6 +968,7 @@ const MCP_TOOLS = [
         term: { type: "integer", description: "Optional term filter (1-4)" },
         academic_year: { type: "integer", description: "Optional academic year filter (e.g., 2024)" },
         include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
+        allow_fallback: { type: "boolean", description: "Allow guarded per-learner fallback when bulk is unsupported (default false)", default: false },
         school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
       },
       additionalProperties: false
@@ -1380,21 +1435,171 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
       const includeMeta = args?.include_meta === true;
       const term = args?.term ? Number(args.term) : undefined;
       const academicYear = args?.academic_year ? Number(args.academic_year) : undefined;
+      const startTime = Date.now();
       if (!mockMode) {
-        return JSON.stringify({
-          error_code: 'CURRPLUS_BULK_NOT_SUPPORTED',
-          message: 'Bulk Curriculum+ marks endpoint is not available; module appears enabled but bulk route is unknown.',
-        }, null, 2);
+        try {
+          const data: any = await getAllLearnerSubjectMarksFromD6(
+            env,
+            schoolLoginId,
+            { limit, cursor, term, academic_year: academicYear },
+            'get_all_marks'
+          );
+          const items = extractItemsFromD6Response(data);
+          const nextCursor =
+            data?.next_cursor ??
+            data?.nextCursor ??
+            data?.cursor ??
+            data?.meta?.next_cursor ??
+            null;
+          const response: Record<string, unknown> = {
+            data: items,
+            next_cursor: nextCursor,
+            meta: {
+              mode: 'bulk',
+              partial: false,
+              processed_learners: 0,
+              errors_count: 0,
+            },
+          };
+          if (includeMeta) {
+            response.meta = { ...(response.meta as Record<string, unknown>), synced_at: new Date().toISOString() };
+          }
+          const durationMs = Date.now() - startTime;
+          console.log(`[get_all_marks] school_login_id=${schoolLoginId} mode=bulk processed=0 duration_ms=${durationMs} errors=0`);
+          return JSON.stringify(response, null, 2);
+        } catch (error) {
+          if (!isBulkRouteUnsupported(error)) {
+            return JSON.stringify({
+              error_code: 'CURRPLUS_BULK_FETCH_FAILED',
+              message: formatD6Error(error),
+            }, null, 2);
+          }
+        }
+
+        try {
+          const allowFallback = args?.allow_fallback === true;
+          if (!allowFallback) {
+            return JSON.stringify({
+              error_code: 'CURRPLUS_BULK_NOT_SUPPORTED',
+              message: 'Bulk Curriculum+ marks endpoint is not available; set allow_fallback=true to enable guarded per-learner fallback.',
+            }, null, 2);
+          }
+
+          const fallbackLimitRequested = Number.isFinite(Number(args?.limit))
+            ? Math.max(1, parseInt(args.limit, 10))
+            : 25;
+          const perLearnerLimit = Math.min(fallbackLimitRequested, 50);
+          const learnersResponse: any = await getLearnersByLoginId(
+            env,
+            schoolLoginId,
+            { limit: perLearnerLimit, cursor },
+            'get_all_marks:learners'
+          );
+          const learners = extractItemsFromD6Response(learnersResponse);
+          const nextCursor =
+            learnersResponse?.next_cursor ??
+            learnersResponse?.nextCursor ??
+            learnersResponse?.cursor ??
+            learnersResponse?.meta?.next_cursor ??
+            null;
+
+          const items: any[] = [];
+          const errors: Array<{ learner_id?: string | number; error: string }> = [];
+          const fallbackStartTime = Date.now();
+          const budgetMs = 8000;
+          const perRequestTimeoutMs = 4000;
+          const concurrency = 5;
+
+          const learnerIds = learners
+            .map(extractLearnerId)
+            .filter((id): id is string | number => id !== undefined);
+
+          let processedLearners = 0;
+          let timedOutEarly = false;
+
+          await mapWithConcurrency(learnerIds, concurrency, async (learnerId) => {
+            if (timedOutEarly) {
+              return;
+            }
+            if (Date.now() - fallbackStartTime > budgetMs) {
+              timedOutEarly = true;
+              return;
+            }
+            processedLearners += 1;
+            try {
+              const marks = await withTimeout(
+                getLearnerMarksFromD6(
+                  env,
+                  schoolLoginId,
+                  learnerId,
+                  `get_all_marks:learner/${learnerId}`,
+                  { term, academic_year: academicYear }
+                ),
+                perRequestTimeoutMs,
+                `get_all_marks:${learnerId}`
+              );
+              const marksItems = extractItemsFromD6Response(marks);
+              if (marksItems.length > 0) {
+                for (const mark of marksItems) {
+                  if (mark && typeof mark === 'object' && !Array.isArray(mark)) {
+                    items.push(mark.learner_id ? mark : { ...mark, learner_id: learnerId });
+                  } else {
+                    items.push({ learner_id: learnerId, value: mark });
+                  }
+                }
+              } else if (marks !== null && marks !== undefined) {
+                items.push({ learner_id: learnerId, marks });
+              }
+            } catch (err) {
+              errors.push({ learner_id: learnerId, error: formatD6Error(err) });
+            }
+          });
+
+          const durationMs = Date.now() - fallbackStartTime;
+          const partial = timedOutEarly || errors.length > 0;
+          const startOffset = Number.isFinite(Number(cursor)) ? Number(cursor) : null;
+          const fallbackCursor = timedOutEarly
+            ? (startOffset !== null ? String(startOffset + processedLearners) : (cursor ?? null))
+            : nextCursor;
+          const response: Record<string, unknown> = {
+            data: items,
+            next_cursor: fallbackCursor,
+            meta: {
+              mode: 'fallback',
+              partial,
+              processed_learners: processedLearners,
+              errors_count: errors.length,
+            },
+          };
+          if (includeMeta) {
+            response.meta = { ...(response.meta as Record<string, unknown>), synced_at: new Date().toISOString() };
+          }
+          console.log(`[get_all_marks] school_login_id=${schoolLoginId} mode=fallback processed=${processedLearners} duration_ms=${durationMs} errors=${errors.length}`);
+          return JSON.stringify(response, null, 2);
+        } catch (error) {
+          return JSON.stringify({
+            error_code: 'CURRPLUS_BULK_FALLBACK_FAILED',
+            message: formatD6Error(error),
+          }, null, 2);
+        }
       }
       const offset = parseInt(cursor || '0', 10);
       const slice = MOCK_SCHOOL_DATA.marks.slice(offset, offset + limit);
       const nextCursor = offset + limit < MOCK_SCHOOL_DATA.marks.length ? String(offset + limit) : null;
-      const payload = {
-        items: slice,
+      const response: Record<string, unknown> = {
+        data: slice,
         next_cursor: nextCursor,
-        total: MOCK_SCHOOL_DATA.marks.length
+        meta: {
+          mode: 'bulk',
+          partial: false,
+          processed_learners: 0,
+          errors_count: 0,
+        },
       };
-      return buildBulkResponse(payload, includeMeta);
+      if (includeMeta) {
+        response.meta = { ...(response.meta as Record<string, unknown>), synced_at: new Date().toISOString() };
+      }
+      return JSON.stringify(response, null, 2);
     }
 
     case 'get_data_summary': {
@@ -1402,7 +1607,7 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
         try {
           logToolInvocation('get_data_summary', mockMode, { school_login_id: schoolLoginId, school_name: schoolName });
           const schoolInfoResponse: any = await getSchoolInfoByLoginId(env, schoolLoginId, 'get_data_summary:school');
-          const learnersResponse = await getLearnersByLoginId(env, schoolLoginId, { limit: 5000 }, 'get_data_summary:learners');
+          const learnersResponse: any = await getLearnersByLoginId(env, schoolLoginId, { limit: 5000 }, 'get_data_summary:learners');
           const staffResponse = await getStaffByLoginId(env, schoolLoginId, {}, 'get_data_summary:staff');
           const parentsResponse = await getParentsByLoginId(env, schoolLoginId, { limit: 5000 }, 'get_data_summary:parents');
 
