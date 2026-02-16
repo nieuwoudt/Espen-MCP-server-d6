@@ -10,7 +10,7 @@
 
 **🌐 Remote MCP Server**: https://espen-d6-mcp-remote.niev.workers.dev  
 **📊 Status**: ✅ **FULLY OPERATIONAL**  
-**🛠️ Tools Available**: 12 optimized MCP tools  
+**🛠️ Tools Available**: 13 optimized MCP tools  
 **📈 Performance**: 37x optimized for Claude Desktop  
 **🌍 Deployment**: Global Cloudflare Workers network  
 
@@ -34,7 +34,7 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 
 --- 
 
-## 🛠️ **12 OPTIMIZED MCP TOOLS**
+## 🛠️ **13 OPTIMIZED MCP TOOLS**
 
 ### 🎯 **Optimized Tools (NEW - Solves Claude Issues)**
 | Tool | Purpose | Response Size | Example Usage |
@@ -51,7 +51,8 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 | `get_staff` | Staff directory | 77+ records | ✅ Working |
 | `get_parents` | Parent information | 1,523+ records | ✅ Working |
 | `get_learner_marks` | Academic records | Per student | ✅ Working |
-| `get_all_marks` / `get_all_subjects` | Curriculum+ bulk | Deterministic guard | ⚠️ Returns `CURRPLUS_BULK_NOT_SUPPORTED` until D6 confirms bulk routes; if Curriculum+ is not enabled for a school, returns `{"data":[],"meta":{"module_enabled":false}}`. Consumers (e.g., sync worker) should fan out per-learner with concurrency caps when bulk is not available. |
+| `get_marks_for_learners` | Deterministic marks sync by learner IDs | Batch (50-100) | ✅ Recommended |
+| `get_all_marks` / `get_all_subjects` | Curriculum+ bulk | Sampling/debug | ⚠️ Non-authoritative. Returns `CURRPLUS_BULK_NOT_SUPPORTED` until D6 confirms bulk routes; if Curriculum+ is not enabled for a school, returns `{"data":[],"meta":{"module_enabled":false}}`. |
 
 ### 🔧 **System Tools**
 | Tool | Purpose | Output | Status |
@@ -91,6 +92,57 @@ Once connected, try these in Claude:
 ✅ "How many students speak each language?"
 ✅ "Get staff members"
 ✅ "Check system health"
+```
+
+### ✅ Deterministic Marks Sync (Recommended)
+- Use `get_marks_for_learners` with 50–100 learner IDs per call for daily syncs.
+- Hash/dedupe learner IDs in Supabase or your sync worker before calling the tool.
+- Avoid `get_all_marks` for authoritative syncs; keep it for sampling/debugging only.
+
+Example request/response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "get_marks_for_learners",
+    "arguments": {
+      "learner_ids": ["2001", "2002", "2003"],
+      "include_meta": true
+    }
+  },
+  "id": 1
+}
+```
+
+```json
+{
+  "data": [
+    {
+      "MarkID": 900000,
+      "LearnerID": "2001",
+      "SubjectCode": "MATH",
+      "SubjectName": "Mathematics",
+      "MarkValue": 42,
+      "TotalMarks": 50,
+      "MarkType": "Test",
+      "Term": 1,
+      "Year": 2024,
+      "AssessmentDate": "2024-02-12",
+      "TeacherComment": null
+    }
+  ],
+  "errors": [],
+  "meta": {
+    "mode": "by_ids",
+    "partial": false,
+    "requested": 3,
+    "success": 3,
+    "errors_count": 0,
+    "synced_at": "2026-01-29T10:15:30.000Z"
+  }
+}
 ```
 
 ### ⚙️ **Environment Highlights**

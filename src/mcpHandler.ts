@@ -823,6 +823,24 @@ const MCP_TOOLS = [
     }
   },
   {
+    name: "get_marks_for_learners",
+    description: "Batch fetch academic marks for a list of learners (deterministic by IDs, Curriculum+).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        learner_ids: {
+          type: "array",
+          items: { type: ["string", "number"] },
+          description: "Array of learner IDs to sync (max 100)"
+        },
+        include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
+        school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
+      },
+      required: ["learner_ids"],
+      additionalProperties: false
+    }
+  },
+  {
     name: "get_learner_subjects",
     description: "Get all subjects for a specific learner from Curriculum+ (learnersubjects endpoint)",
     inputSchema: {
@@ -1160,6 +1178,175 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
       } catch (error) {
         return `❌ D6 API error while fetching learner marks: ${formatD6Error(error)}`;
       }
+    }
+
+    case 'get_marks_for_learners': {
+      const rawLearnerIds = args?.learner_ids;
+      const includeMeta = args?.include_meta === true;
+
+      const invalidPayload = (details: Record<string, unknown>) =>
+        JSON.stringify({
+          error_code: 'INVALID_LEARNER_IDS',
+          message: 'learner_ids must be a non-empty array of up to 100 string or number values.',
+          details,
+        }, null, 2);
+
+      if (!Array.isArray(rawLearnerIds)) {
+        return invalidPayload({ reason: 'learner_ids_not_array' });
+      }
+
+      const normalizedLearnerIds = rawLearnerIds
+        .map((id: unknown) => {
+          if (typeof id === 'number' && Number.isFinite(id)) {
+            return String(id);
+          }
+          if (typeof id === 'string') {
+            const trimmed = id.trim();
+            return trimmed.length > 0 ? trimmed : null;
+          }
+          return null;
+        })
+        .filter((id): id is string => id !== null);
+
+      if (normalizedLearnerIds.length === 0) {
+        return invalidPayload({ reason: 'learner_ids_empty' });
+      }
+
+      if (normalizedLearnerIds.length !== rawLearnerIds.length) {
+        return invalidPayload({ reason: 'learner_ids_invalid_entry' });
+      }
+
+      if (normalizedLearnerIds.length > 100) {
+        return invalidPayload({ reason: 'learner_ids_too_many', limit: 100, received: normalizedLearnerIds.length });
+      }
+
+      const items: any[] = [];
+      const errors: Array<{ learner_id: string; error: string }> = [];
+      let successCount = 0;
+      const startTime = Date.now();
+
+      if (!mockMode) {
+        const budgetMs = 8000;
+        const perRequestTimeoutMs = 4000;
+        const concurrency = 5;
+        let timedOutEarly = false;
+
+        await mapWithConcurrency(normalizedLearnerIds, concurrency, async (learnerId) => {
+          if (timedOutEarly) {
+            return;
+          }
+          if (Date.now() - startTime > budgetMs) {
+            timedOutEarly = true;
+            return;
+          }
+          try {
+            const marks = await withTimeout(
+              getLearnerMarksFromD6(
+                env,
+                schoolLoginId,
+                learnerId,
+                `get_marks_for_learners:${learnerId}`
+              ),
+              perRequestTimeoutMs,
+              `get_marks_for_learners:${learnerId}`
+            );
+            successCount += 1;
+            const marksItems = extractItemsFromD6Response(marks);
+            if (marksItems.length > 0) {
+              for (const mark of marksItems) {
+                if (mark && typeof mark === 'object' && !Array.isArray(mark)) {
+                  items.push(mark.learner_id || mark.LearnerID || mark.learnerId ? mark : { ...mark, learner_id: learnerId });
+                } else {
+                  items.push({ learner_id: learnerId, value: mark });
+                }
+              }
+            } else if (marks !== null && marks !== undefined) {
+              items.push({ learner_id: learnerId, marks });
+            }
+          } catch (err) {
+            errors.push({ learner_id: learnerId, error: formatD6Error(err) });
+          }
+        });
+
+        const durationMs = Date.now() - startTime;
+        const partial = timedOutEarly || errors.length > 0;
+        const response: Record<string, unknown> = {
+          data: items,
+          errors,
+          meta: {
+            mode: 'by_ids',
+            partial,
+            requested: normalizedLearnerIds.length,
+            processed_learners: successCount,
+            success: successCount,
+            errors_count: errors.length,
+          },
+        };
+        if (includeMeta) {
+          response.meta = { ...(response.meta as Record<string, unknown>), synced_at: new Date().toISOString() };
+        }
+        console.log(`[get_marks_for_learners] school_login_id=${schoolLoginId} requested=${normalizedLearnerIds.length} success=${successCount} errors=${errors.length} duration_ms=${durationMs}`);
+        return JSON.stringify(response, null, 2);
+      }
+
+      const markTypes = ["Test", "Assignment", "Project", "Exam", "Practical", "Oral", "Portfolio"];
+      const subjects = MOCK_SCHOOL_DATA.subjects;
+      let markIdCounter = 900000;
+      const hash = (value: string) => {
+        let total = 0;
+        for (let i = 0; i < value.length; i += 1) {
+          total = ((total << 5) - total + value.charCodeAt(i)) | 0;
+        }
+        return Math.abs(total);
+      };
+
+      normalizedLearnerIds.forEach((learnerId) => {
+        const seed = hash(learnerId);
+        const marksCount = 2 + (seed % 2);
+        for (let i = 0; i < marksCount; i += 1) {
+          const subject = subjects[(seed + i) % subjects.length];
+          const term = ((seed + i) % 4) + 1;
+          const markType = markTypes[(seed + i) % markTypes.length];
+          const totalMarks = markType === "Exam" ? 100 : (markType === "Test" ? 50 : 20);
+          const markValue = Math.round((((seed + i * 7) % 60) + 40) / 100 * totalMarks);
+          const month = String(term * 3 - 1).padStart(2, '0');
+          const day = String(((seed + i * 11) % 28) + 1).padStart(2, '0');
+
+          items.push({
+            MarkID: markIdCounter++,
+            LearnerID: learnerId,
+            SubjectCode: subject?.code || "GEN",
+            SubjectName: subject?.name || "General Studies",
+            MarkValue: markValue,
+            TotalMarks: totalMarks,
+            MarkType: markType,
+            Term: term,
+            Year: 2024,
+            AssessmentDate: `2024-${month}-${day}`,
+            TeacherComment: null,
+          });
+        }
+        successCount += 1;
+      });
+
+      const response: Record<string, unknown> = {
+        data: items,
+        errors: [],
+        meta: {
+          mode: 'by_ids',
+          partial: false,
+          requested: normalizedLearnerIds.length,
+          processed_learners: successCount,
+          success: successCount,
+          errors_count: 0,
+        },
+      };
+      if (includeMeta) {
+        response.meta = { ...(response.meta as Record<string, unknown>), synced_at: new Date().toISOString() };
+      }
+      const durationMs = Date.now() - startTime;
+      console.log(`[get_marks_for_learners] school_login_id=${schoolLoginId} requested=${normalizedLearnerIds.length} success=${successCount} errors=0 duration_ms=${durationMs}`);
+      return JSON.stringify(response, null, 2);
     }
 
     case 'get_learner_subjects': {
