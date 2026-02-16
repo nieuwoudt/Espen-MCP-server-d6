@@ -107,6 +107,7 @@ Add to your `mcp.json` file:
 | `get_schools` | List available schools | 3 demo schools | 1 real D6 school |
 | `get_learners` | Get learner information | 25+ mock learners | Limited (contact D6) |
 | `get_learner_marks` | Academic assessments | Full mock data | Not available |
+| `get_marks_for_learners` | Deterministic marks sync by learner IDs | Batch mock marks | Limited (Curriculum+ access required) |
 | `get_staff` | Staff information | 15+ mock staff | Not available |
 | `get_parents` | Parent details | Complete mock data | Not available |
 | `get_lookup_data` | System lookup values | All types | Genders only |
@@ -162,6 +163,58 @@ The current D6 integration (ID: 1694) has limited demo data access:
 3. **Parent Data**: Endpoints not available in current integration
 4. **Assessment Data**: Marks endpoints not available
 5. **Lookup Data**: Only gender lookup currently available
+
+## ✅ Deterministic Marks Sync (Recommended)
+
+- Use `get_marks_for_learners` for authoritative, ID-driven daily syncs.
+- Batch learner IDs in groups of 50–100 and hash/dedupe in Supabase or your sync worker.
+- `get_all_marks` is non-authoritative and should be treated as sampling/debug only.
+
+Example request/response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "name": "get_marks_for_learners",
+    "arguments": {
+      "learner_ids": ["2001", "2002", "2003"],
+      "include_meta": true
+    }
+  },
+  "id": 1
+}
+```
+
+```json
+{
+  "data": [
+    {
+      "MarkID": 900000,
+      "LearnerID": "2001",
+      "SubjectCode": "MATH",
+      "SubjectName": "Mathematics",
+      "MarkValue": 42,
+      "TotalMarks": 50,
+      "MarkType": "Test",
+      "Term": 1,
+      "Year": 2024,
+      "AssessmentDate": "2024-02-12",
+      "TeacherComment": null
+    }
+  ],
+  "errors": [],
+  "meta": {
+    "mode": "by_ids",
+    "partial": false,
+    "requested": 3,
+    "success": 3,
+    "errors_count": 0,
+    "synced_at": "2026-01-29T10:15:30.000Z"
+  }
+}
+```
 
 ### Recommended Actions
 1. **Contact D6 Support** to activate additional endpoints for integration 1694
