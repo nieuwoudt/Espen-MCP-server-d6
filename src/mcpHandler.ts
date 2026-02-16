@@ -893,6 +893,8 @@ const MCP_TOOLS = [
           items: { type: ["string", "number"] },
           description: "Array of learner IDs to sync (max 100)"
         },
+        term: { type: "integer", description: "Optional term filter (1-4)" },
+        academic_year: { type: "integer", description: "Optional academic year filter (e.g., 2026)" },
         include_meta: { type: "boolean", description: "Include envelope meta.synced_at (default false)", default: false },
         school_login_id: { type: "integer", description: "Optional school login ID (numeric)" }
       },
@@ -1244,6 +1246,8 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
     case 'get_marks_for_learners': {
       const rawLearnerIds = args?.learner_ids;
       const includeMeta = args?.include_meta === true;
+      const termFilter = args?.term ? Number(args.term) : undefined;
+      const academicYearFilter = args?.academic_year ? Number(args.academic_year) : undefined;
 
       const invalidPayload = (details: Record<string, unknown>) =>
         JSON.stringify({
@@ -1306,7 +1310,8 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
                 env,
                 schoolLoginId,
                 learnerId,
-                `get_marks_for_learners:${learnerId}`
+                `get_marks_for_learners:${learnerId}`,
+                { term: termFilter, academic_year: academicYearFilter }
               ),
               perRequestTimeoutMs,
               `get_marks_for_learners:${learnerId}`
@@ -1337,9 +1342,8 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
           meta: {
             mode: 'by_ids',
             partial,
-            requested: normalizedLearnerIds.length,
-            processed_learners: successCount,
-            success: successCount,
+            requested_learners_count: normalizedLearnerIds.length,
+            successful_learners_count: successCount,
             errors_count: errors.length,
           },
         };
@@ -1396,9 +1400,8 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
         meta: {
           mode: 'by_ids',
           partial: false,
-          requested: normalizedLearnerIds.length,
-          processed_learners: successCount,
-          success: successCount,
+          requested_learners_count: normalizedLearnerIds.length,
+          successful_learners_count: successCount,
           errors_count: 0,
         },
       };
