@@ -1,222 +1,164 @@
 # Espen D6 MCP Server - Project Status Summary
 
-*Last Updated: January 3, 2025*
+*Last Updated: March 2, 2026*
 
 ## 🎯 Project Goal
-Build an MCP (Model Context Protocol) server that connects Claude to D6 education platform's production data, enabling natural language queries about student information, academic records, and school operations.
+Build an MCP (Model Context Protocol) server that connects Claude and Supabase sync workers to D6 education platform's production data, enabling natural language queries and deterministic batch syncing of student information, academic records, and school operations.
 
 ## ✅ What's Complete & Working
 
 ### 1. MCP Server Infrastructure
-- **✅ Production-ready MCP server** with 8 functional tools
-- **✅ Official Vercel MCP adapter** implementation
-- **✅ Hybrid mode** (production API + mock data fallback)
-- **✅ Proper error handling** and logging
-- **✅ Environment configuration** management
+- **✅ Production MCP server** with **22 functional tools** on Vercel
+- **✅ Shared handler architecture** (`src/mcpHandler.ts`) — single source of truth for both Cloudflare and Vercel
+- **✅ Multi-school support** — 13 authorized schools via `D6_ALLOWED_SCHOOL_LOGIN_IDS`
+- **✅ Mock mode** for local development (`D6_MOCK_MODE=true`), disabled in production
+- **✅ Production guards** — mock mode blocked in production environments
 
 ### 2. D6 API Integration
-- **✅ Authentication working** with D6 production API
-- **✅ Correct API architecture understanding**:
-  - Integration 1694 IS the test school (not a container)
-  - No separate school_id parameters needed
-  - API is already scoped to our authorized integration
-- **✅ Integration verification**: Can access `/v1/settings/clients` successfully
-- **✅ Integration status**: "d6 Integrate API Test School" shows as activated
+- **✅ Authentication working** with production integrator account (`espenaiapi`)
+- **✅ Multi-school architecture**: Single integrator, multiple schools via `school_login_id` in URL path
+- **✅ AdminPlus endpoints**: Learners, staff, parents — all returning real data
+- **✅ Curriculum+ endpoints**: Learner marks, subjects, subjects-per-term — all working
+- **✅ Settings endpoints**: Client integrations, enable/disable, bulk activation
+- **✅ Primary school**: Laerskool Monumentpark (`school_login_id=1352`) — fully operational
 
-### 3. MCP Tools (8 Total)
-1. **`get_schools`** - Client integration information
-2. **`get_learners`** - Student data (uses correct API pattern)
-3. **`get_staff`** - Staff directory (uses correct API pattern)
-4. **`get_parents`** - Parent information (uses correct API pattern)
-5. **`get_learner_marks`** - Academic records (requires learnerId)
-6. **`get_lookup_data`** - System reference data (genders, grades, subjects)
-7. **`get_system_health`** - API connectivity status
-8. **`get_integration_info`** - Integration configuration details
+### 3. MCP Tools (22 Total)
 
-### 4. Vercel Deployment Infrastructure 🚀
+#### Core Data Tools
+| Tool | Purpose | Status |
+|------|---------|--------|
+| `get_schools` | School/client integration info | ✅ Working |
+| `get_learners` | Learner data with pagination (default 50, max 1000) | ✅ Working |
+| `get_all_learners` | Compatibility alias for get_learners | ✅ Working |
+| `get_staff` | Complete staff directory | ✅ Working |
+| `get_parents` | Complete parent database | ✅ Working |
+| `get_learner_marks` | Single learner marks (Curriculum+) | ✅ Working |
+| `get_marks_for_learners` | **Batch marks sync by learner IDs (max 100)** | ✅ **NEW — Production verified** |
+| `get_learner_subjects` | Single learner subjects (Curriculum+) | ✅ Working |
+| `get_learner_subjects_per_term` | Single learner subjects per term | ✅ Working |
+| `get_all_subjects` | Bulk subjects (paged, tenant-scoped) | ✅ Working |
+| `get_all_marks` | Bulk marks — sampling/debug only, not for sync | ⚠️ Non-authoritative |
 
-#### 4.1 Packages Installed for Vercel
-**Core MCP Dependencies:**
+#### Optimized Query Tools
+| Tool | Purpose | Status |
+|------|---------|--------|
+| `get_learners_by_language` | Filter learners by home language | ✅ Working |
+| `get_learners_by_grade` | Filter learners by grade level | ✅ Working |
+| `get_data_summary` | School statistics (counts, distributions) | ✅ Working |
+
+#### Admin / Settings Tools
+| Tool | Purpose | Status |
+|------|---------|--------|
+| `d6_get_school_info` | Direct D6 AdminPlus school info | ✅ Working |
+| `d6_get_learners` | Direct D6 AdminPlus learners | ✅ Working |
+| `enable_d6_client` | Enable/disable D6 client integration | ✅ Working |
+| `bulk_enable_d6_schools` | Batch school activation | ✅ Working |
+| `list_d6_schools` | List integrator's schools (filtered) | ✅ Working |
+
+#### System Tools
+| Tool | Purpose | Status |
+|------|---------|--------|
+| `get_lookup_data` | Reference data (genders, etc.) | ✅ Working |
+| `get_system_health` | API health check with response time | ✅ Working |
+| `get_integration_info` | Integration config details | ✅ Working |
+
+### 4. `get_marks_for_learners` — Deterministic Batch Sync (NEW)
+
+The primary engine for daily marks sync. Replaces reliance on unstable pagination.
+
+**Input:**
+- `school_login_id` (integer) — which school
+- `learner_ids` (array, max 100) — exactly which learners to fetch
+- `term` (integer, optional) — filter by term 1-4
+- `academic_year` (integer, optional) — filter by year
+- `include_meta` (boolean) — include `synced_at` timestamp
+
+**Response shape (exact field names):**
 ```json
 {
-  "@vercel/mcp-adapter": "^0.11.1",  // Official Vercel MCP adapter
-  "zod": "^3.25.68"                  // Schema validation (required by adapter)
-}
-```
-
-**Additional Vercel Dependencies:**
-```json
-{
-  "@vercel/node": "^5.3.1"          // Vercel Node.js runtime
-}
-```
-
-#### 4.2 Vercel Configuration (`vercel.json`)
-```json
-{
-  "version": 2,
-  "name": "espen-d6-mcp-server",
-  "buildCommand": "npm run build",
-  "functions": {
-    "api/*.ts": {
-      "maxDuration": 30,              // 30-second timeout for MCP operations
-      "memory": 512                   // 512MB memory allocation for D6 API calls
-    }
-  },
-  "env": {
-    "NODE_ENV": "production"
+  "data": [ { "learner_id": "3262", "subject_name": "...", ... } ],
+  "errors": [],
+  "meta": {
+    "mode": "by_ids",
+    "partial": false,
+    "requested_learners_count": 16,
+    "successful_learners_count": 16,
+    "errors_count": 0,
+    "synced_at": "2026-02-16T11:58:54.816Z"
   }
 }
 ```
 
-#### 4.3 Vercel API Endpoint (`api/index.ts`)
-**Uses Official MCP Adapter:**
-```typescript
-import { createMcpHandler } from '@vercel/mcp-adapter';
-import { z } from 'zod';
+**Production validation (Feb 16, 2026):**
+- ✅ 16 real learner IDs → 675 marks returned, 0 errors
+- ✅ Every row has `learner_id` (injected if D6 omits it)
+- ✅ Zero duplicate rows
+- ✅ Two identical calls → identical data (deterministic)
+- ✅ Concurrency=5, per-request timeout=4s, overall budget=8s
 
-const handler = createMcpHandler(
-  (server) => {
-    // 8 MCP tools registered here
-    server.tool('get_schools', ...);
-    server.tool('get_learners', ...);
-    // ... etc
-  },
-  {},
-  { basePath: '/api' }
-);
+### 5. Deployment Architecture
 
-export { handler as GET, handler as POST, handler as DELETE };
+**Production URL:** `https://espen-mcp-server-d6.vercel.app/sse`
+
+```
+Claude / Sync Worker → POST /sse → Vercel Edge Function → Shared mcpHandler.ts → D6 API
 ```
 
-#### 4.4 Environment Variables for Vercel
-**Required Production Environment Variables:**
-```bash
-D6_API_BASE_URL=https://integrate.d6plus.co.za/api/v2
-D6_API_USERNAME=espenaitestapi
-D6_API_PASSWORD=qUz3mPcRsfSWxKR9qEnm
-D6_PRODUCTION_MODE=true
-NODE_ENV=production
-```
+- **Vercel**: Production deployment (auto-deploys from `main` branch)
+- **Cloudflare**: Legacy deployment (still active at `espen-d6-mcp-remote.niev.workers.dev`)
+- **Shared handler**: Both platforms use identical `src/mcpHandler.ts`
 
-#### 4.5 Deployment Commands
-```bash
-# Install Vercel CLI
-npm i -g vercel
+### 6. Testing & Validation
+- **✅ TypeScript build** — `npm run build` passes cleanly (Vercel tsconfig)
+- **✅ Production runtime** — all 22 tools verified on live Vercel deployment
+- **✅ Real D6 data** — tested with school 1352 (Laerskool Monumentpark)
+- **✅ Multi-school** — school whitelist + name mapping via environment variables
 
-# Deploy to Vercel
-vercel --prod
+## 📊 Current Environment
 
-# Or using the build command
-npm run build && vercel deploy --prod
-```
+| Setting | Value |
+|---------|-------|
+| **Primary School** | Laerskool Monumentpark (`school_login_id=1352`) |
+| **API Base URL** | `https://integrate.d6plus.co.za/api` |
+| **Auth** | Production integrator credentials |
+| **Mock Mode** | `false` in production, `true` for local dev |
+| **Schools Whitelisted** | 13 via `D6_ALLOWED_SCHOOL_LOGIN_IDS` |
+| **Vercel URL** | `https://espen-mcp-server-d6.vercel.app/sse` |
 
-#### 4.6 MCP Inspector Testing (Post-Deployment)
-```bash
-# Test deployed MCP server
-npx @modelcontextprotocol/inspector https://your-vercel-url.vercel.app/api
-```
+## 📁 Key Files
 
-### 5. Testing & Validation
-- **✅ Local MCP protocol testing** - server initializes correctly
-- **✅ Tool registration** - all 8 tools registered successfully
-- **✅ Authentication testing** - credentials work perfectly
-- **✅ API version detection** - hybrid fallback working
-
-## 🚫 What's Blocked (Waiting for D6)
-
-### Data Access Endpoints
-All student/staff/parent data endpoints return `404 - route_not_found`:
-- `/v1/adminplus/learners` ❌
-- `/v1/adminplus/staffmembers` ❌  
-- `/v1/adminplus/parents` ❌
-- `/v1/adminplus/marks` ❌
-
-**Root Cause**: Data endpoints need activation for integration 1694
-
-**Status**: Email sent to Patrick at D6 requesting endpoint activation
-
-## 📊 Technical Details
-
-### Current Environment
-- **Integration ID**: 1694 ("d6 Integrate API Test School")
-- **API Base URL**: https://integrate.d6plus.co.za/api/v2
-- **Authentication**: Working (espenaitestapi credentials)
-- **API Pattern**: Correct (no school_id parameters needed)
-- **Test Mode**: Ready for immediate activation
-
-### MCP Protocol Status
-```
-✅ MCP server initialization successful with protocol 2024-11-05
-✅ All 8 tools registered and functional  
-✅ D6 API v2 detected as available
-✅ Hybrid mode working perfectly
-```
-
-### File Structure (Cleaned)
 ```
 espen-d6-mcp-server/
-├── api/
-│   └── index.ts                    # Vercel MCP endpoint (uses @vercel/mcp-adapter)
-├── src/
-│   ├── mcp-server.ts              # Local development MCP server
-│   ├── services/
-│   │   └── d6ApiService-hybrid.ts # D6 API service (updated with correct patterns)
-│   └── types/d6.ts                # D6 data type definitions
-├── scripts/
-│   ├── test-correct-d6-pattern.ts # Current API testing
-│   ├── test-mcp-complete.ts       # Full MCP validation
-│   └── archive/                   # Old test files moved here
-├── vercel.json                    # Vercel deployment configuration (512MB, 30s timeout)
-├── package.json                   # Includes @vercel/mcp-adapter + zod
-├── .env                           # Production credentials
-└── documentation/
-    ├── D6_INTEGRATION_REFERENCE.md
-    ├── D6_SUPPORT_EMAIL_DRAFT.md
-    └── VERCEL_DEPLOYMENT.md
+├── api/mcp.ts                     # Vercel Edge Function entry point
+├── src/mcpHandler.ts              # Shared MCP handler (22 tools, all logic)
+├── src/cloudflare-worker-minimal.ts  # Cloudflare Worker entry point
+├── vercel.json                    # Vercel rewrites (/sse → /api/mcp)
+├── tsconfig.vercel.json           # Build config for Vercel
+├── package.json                   # Dependencies + scripts
+├── README.md                      # User-facing docs
+├── D6_INTEGRATION.md              # D6 API integration reference
+└── VERCEL_DEPLOYMENT_GUIDE.md     # Deployment instructions
 ```
-
-## 🔄 Corrected Understanding
-
-### Previously Misunderstood
-- ❌ Thought school 1000 existed within integration 1694
-- ❌ Used school_id parameters in API calls
-- ❌ Confused integration vs school architecture
-
-### Now Correctly Understood
-- ✅ Integration 1694 IS the test school itself
-- ✅ API is already scoped to our integration
-- ✅ No school_id parameters needed in data calls
-- ✅ Endpoints just need activation from D6
 
 ## 🚀 Next Steps
 
-### Immediate (Waiting for D6)
-1. **D6 Support Response** - Patrick to activate data endpoints for integration 1694
-2. **Test Real Data** - Validate actual student/staff/parent data once activated
-3. **Vercel Deployment** - Deploy to production once data access confirmed
+### For Slava (Sync Worker)
+1. Use `get_marks_for_learners` as primary marks sync engine
+2. Pull learner IDs from Supabase, chunk into batches of 50-100
+3. Call tool per batch, hash/dedupe in Supabase
+4. If `partial: true`, re-queue the batch
+5. Use `term` / `academic_year` filters for incremental sync
 
-### Post-Activation Deployment Process
-1. **Set Environment Variables** in Vercel dashboard:
-   ```
-   D6_API_BASE_URL=https://integrate.d6plus.co.za/api/v2
-   D6_API_USERNAME=espenaitestapi
-   D6_API_PASSWORD=qUz3mPcRsfSWxKR9qEnm
-   D6_PRODUCTION_MODE=true
-   ```
-2. **Deploy with Vercel CLI**: `vercel --prod`
-3. **Test with MCP Inspector**: `npx @modelcontextprotocol/inspector https://your-deployment.vercel.app/api`
-4. **Claude Desktop Integration**: Add URL to Claude configuration
+### Remaining Work
+- [ ] **Supabase sync worker** — implement batch orchestration using `get_marks_for_learners`
+- [ ] **Timeout/partial path** — runtime test with genuinely slow D6 responses
+- [ ] **Additional schools** — validate `get_marks_for_learners` across all 13 whitelisted schools
+- [ ] **Vercel Preview bypass** — configure `VERCEL_AUTOMATION_BYPASS_SECRET` for pre-merge testing
 
 ## 📈 Success Metrics
-- ✅ **MCP Server**: Production-ready (8/8 tools working)
-- ✅ **Authentication**: 100% working
-- ✅ **Architecture**: Correctly understood and implemented  
-- ⏳ **Data Access**: 0% (blocked by D6 endpoint activation)
-- ✅ **Deployment Ready**: 100% configured
-- ✅ **Vercel Setup**: Complete with official MCP adapter
-
-## 📞 Current Status
-**READY FOR IMMEDIATE ACTIVATION** - All technical work complete, waiting only for D6 to enable data endpoints for integration 1694.
-
-The integration is technically sound with proper Vercel deployment configuration using the official `@vercel/mcp-adapter` package. It will work immediately once D6 activates the data access endpoints. 
+- ✅ **MCP Server**: Production-ready (22/22 tools live)
+- ✅ **Authentication**: Working with production integrator
+- ✅ **Data Access**: Full AdminPlus + Curriculum+ access for school 1352
+- ✅ **Batch Sync**: `get_marks_for_learners` validated on real data
+- ✅ **Deployment**: Auto-deploy from `main` via Vercel
+- ✅ **Multi-school**: 13 schools whitelisted and accessible 
