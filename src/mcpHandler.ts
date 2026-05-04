@@ -232,6 +232,79 @@ function getParentsByLoginId(
   });
 }
 
+/** Query params for D6 Admin+ learnerabsentees / learnerdiscipline (see apidocs.d6plus.co.za). */
+interface AdminPlusLearnerPastoralQuery {
+  learner_id?: number;
+  from_date?: string;
+  to_date?: string;
+}
+
+/**
+ * GET /v1/adminplus/learnerabsentees/{school_login_id}
+ * Default: last month. Optional learner_id, from_date, to_date (max 31-day span).
+ */
+function getLearnerAbsenteesFromD6(
+  env: EnvLike,
+  loginId: number,
+  params: AdminPlusLearnerPastoralQuery = {},
+  traceLabel = 'learnerabsentees'
+) {
+  return d6Request(env, 'GET', `/v1/adminplus/learnerabsentees/${loginId}`, {
+    query: {
+      learner_id: params.learner_id,
+      from_date: params.from_date,
+      to_date: params.to_date,
+    },
+    traceLabel: `${traceLabel}/${loginId}`,
+  });
+}
+
+/**
+ * GET /v1/adminplus/learnerdiscipline/{school_login_id}
+ * Same query semantics as absentees.
+ */
+function getLearnerDisciplineFromD6(
+  env: EnvLike,
+  loginId: number,
+  params: AdminPlusLearnerPastoralQuery = {},
+  traceLabel = 'learnerdiscipline'
+) {
+  return d6Request(env, 'GET', `/v1/adminplus/learnerdiscipline/${loginId}`, {
+    query: {
+      learner_id: params.learner_id,
+      from_date: params.from_date,
+      to_date: params.to_date,
+    },
+    traceLabel: `${traceLabel}/${loginId}`,
+  });
+}
+
+/** Validates optional date range before calling D6 (API rejects ranges over 31 days). */
+function validatePastoralDateRange(from_date?: string, to_date?: string): string | null {
+  if (!from_date && !to_date) return null;
+  if (!from_date || !to_date) {
+    return 'Provide both from_date and to_date (YYYY-MM-DD), or omit both to use the D6 default window (last month).';
+  }
+  const from = new Date(`${from_date}T00:00:00Z`);
+  const to = new Date(`${to_date}T00:00:00Z`);
+  if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    return 'from_date and to_date must be valid dates in YYYY-MM-DD format.';
+  }
+  if (to < from) {
+    return 'to_date must be on or after from_date.';
+  }
+  const diffDays = (to.getTime() - from.getTime()) / 86400000 + 1;
+  if (diffDays > 31) {
+    return 'Date range must not span more than 31 days (D6 API rule). Use multiple calls for longer history.';
+  }
+  return null;
+}
+
+function isD6EmptyNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /\b404\b/.test(msg);
+}
+
 interface LearnerMarksQueryParams {
   term?: number;
   academic_year?: number;
@@ -1138,6 +1211,36 @@ const MCP_TOOLS = [
           description: "If true, only include schools in D6_ALLOWED_SCHOOL_LOGIN_IDS.",
           default: true
         }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learner_absentees",
+    description:
+      "Admin+: Fetch learner absentee records from D6 (GET /v1/adminplus/learnerabsentees/{school_login_id}). By default returns the last month. Optional learner_id filters to one learner. Optional from_date and to_date (YYYY-MM-DD) must be used together; range cannot exceed 31 days. Returns JSON array of { id, learner_id, absent_date, absent_reason }. HTTP 404 from D6 (no records) is returned as an empty records array.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_id: { type: "integer", description: "D6 school login ID (numeric)" },
+        learner_id: { type: "integer", description: "Optional: restrict to a single learner" },
+        from_date: { type: "string", description: "Range start YYYY-MM-DD (requires to_date)" },
+        to_date: { type: "string", description: "Range end YYYY-MM-DD (requires from_date)" }
+      },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learner_discipline",
+    description:
+      "Admin+: Fetch learner discipline records from D6 (GET /v1/adminplus/learnerdiscipline/{school_login_id}). Same date/learner rules as get_learner_absentees. Returns JSON array with discipline_date, discipline_category, discipline_reason, discipline_points, etc. HTTP 404 (no records) is returned as an empty records array.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_id: { type: "integer", description: "D6 school login ID (numeric)" },
+        learner_id: { type: "integer", description: "Optional: restrict to a single learner" },
+        from_date: { type: "string", description: "Range start YYYY-MM-DD (requires to_date)" },
+        to_date: { type: "string", description: "Range end YYYY-MM-DD (requires from_date)" }
       },
       additionalProperties: false
     }
@@ -2061,6 +2164,170 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
       } catch (error) {
         return `❌ D6 API error while fetching schools list: ${formatD6Error(error)}`;
       }
+    }
+
+    case 'get_learner_absentees': {
+      const dateErr = validatePastoralDateRange(args?.from_date, args?.to_date);
+      if (dateErr) {
+        return JSON.stringify({ error: true, message: dateErr }, null, 2);
+      }
+
+      const learnerIdArg =
+        args?.learner_id !== undefined && args?.learner_id !== null && args?.learner_id !== ''
+          ? Number(args.learner_id)
+          : undefined;
+      const query: AdminPlusLearnerPastoralQuery = {};
+      if (learnerIdArg !== undefined && Number.isFinite(learnerIdArg)) {
+        query.learner_id = learnerIdArg;
+      }
+      if (args?.from_date && args?.to_date) {
+        query.from_date = String(args.from_date);
+        query.to_date = String(args.to_date);
+      }
+
+      if (!mockMode) {
+        try {
+          logToolInvocation('get_learner_absentees', mockMode, {
+            school_login_id: schoolLoginId,
+            school_name: schoolName,
+            ...query,
+          });
+          let data: unknown;
+          try {
+            data = await getLearnerAbsenteesFromD6(env, schoolLoginId, query, 'get_learner_absentees');
+          } catch (err) {
+            if (isD6EmptyNotFoundError(err)) {
+              data = [];
+            } else {
+              throw err;
+            }
+          }
+          const records = Array.isArray(data) ? data : data != null ? [data] : [];
+          return JSON.stringify(
+            {
+              tool: 'get_learner_absentees',
+              school_login_id: schoolLoginId,
+              school_name: schoolName,
+              query,
+              record_count: records.length,
+              records,
+            },
+            null,
+            2
+          );
+        } catch (error) {
+          return `❌ D6 API error while fetching learner absentees: ${formatD6Error(error)}`;
+        }
+      }
+
+      const mockRecords = [
+        {
+          id: 'mock-abs-1',
+          learner_id: String(learnerIdArg ?? 3262),
+          absent_date: '2026-04-10',
+          absent_reason: 'Illness',
+        },
+        {
+          id: 'mock-abs-2',
+          learner_id: String(learnerIdArg ?? 3262),
+          absent_date: '2026-04-12',
+          absent_reason: 'Family responsibility',
+        },
+      ];
+      return JSON.stringify(
+        {
+          tool: 'get_learner_absentees',
+          mode: 'mock',
+          school_login_id: schoolLoginId,
+          school_name: schoolName,
+          query,
+          record_count: mockRecords.length,
+          records: mockRecords,
+        },
+        null,
+        2
+      );
+    }
+
+    case 'get_learner_discipline': {
+      const dateErr = validatePastoralDateRange(args?.from_date, args?.to_date);
+      if (dateErr) {
+        return JSON.stringify({ error: true, message: dateErr }, null, 2);
+      }
+
+      const learnerIdArg =
+        args?.learner_id !== undefined && args?.learner_id !== null && args?.learner_id !== ''
+          ? Number(args.learner_id)
+          : undefined;
+      const query: AdminPlusLearnerPastoralQuery = {};
+      if (learnerIdArg !== undefined && Number.isFinite(learnerIdArg)) {
+        query.learner_id = learnerIdArg;
+      }
+      if (args?.from_date && args?.to_date) {
+        query.from_date = String(args.from_date);
+        query.to_date = String(args.to_date);
+      }
+
+      if (!mockMode) {
+        try {
+          logToolInvocation('get_learner_discipline', mockMode, {
+            school_login_id: schoolLoginId,
+            school_name: schoolName,
+            ...query,
+          });
+          let data: unknown;
+          try {
+            data = await getLearnerDisciplineFromD6(env, schoolLoginId, query, 'get_learner_discipline');
+          } catch (err) {
+            if (isD6EmptyNotFoundError(err)) {
+              data = [];
+            } else {
+              throw err;
+            }
+          }
+          const records = Array.isArray(data) ? data : data != null ? [data] : [];
+          return JSON.stringify(
+            {
+              tool: 'get_learner_discipline',
+              school_login_id: schoolLoginId,
+              school_name: schoolName,
+              query,
+              record_count: records.length,
+              records,
+            },
+            null,
+            2
+          );
+        } catch (error) {
+          return `❌ D6 API error while fetching learner discipline: ${formatD6Error(error)}`;
+        }
+      }
+
+      const mockRecords = [
+        {
+          id: 'mock-disc-1',
+          learner_id: String(learnerIdArg ?? 3262),
+          discipline_date: '2026-04-05',
+          discipline_category: 'Level 1',
+          discipline_reason: 'Appearance : Hair / Nails',
+          discipline_points: '-1',
+          discipline_remarks: '',
+          staff_member_id: '3',
+        },
+      ];
+      return JSON.stringify(
+        {
+          tool: 'get_learner_discipline',
+          mode: 'mock',
+          school_login_id: schoolLoginId,
+          school_name: schoolName,
+          query,
+          record_count: mockRecords.length,
+          records: mockRecords,
+        },
+        null,
+        2
+      );
     }
 
     default:
