@@ -1,28 +1,21 @@
 {
-  "extends": "./tsconfig.json",
   "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true,
+    "strict": true,
+    "noImplicitAny": false,
+    "strictNullChecks": true,
+    "skipLibCheck": true,
     "noEmit": false,
     "outDir": "dist-vercel",
-    "skipLibCheck": true
+    "lib": ["ES2022", "DOM"],
+    "types": ["node"],
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
   },
-  "include": [
-    "api/mcp.ts",
-    "src/mcpHandler.ts"
-  ],
-  "exclude": [
-    "dist",
-    "scripts/**/*",
-    "src/index*.ts",
-    "src/mcp-server*.ts",
-    "src/cloudflare-worker*.ts",
-    "src/api/context.ts",
-    "src/db/**/*",
-    "src/services/**/*",
-    "src/middleware/**/*",
-    "**/*.test.ts",
-    "**/*.spec.ts",
-    ".tmp-mcp-check.ts",
-    "node_modules"
-  ]
+  "include": ["api/mcp.ts", "src/mcpHandler.ts"],
+  "exclude": ["node_modules"]
 }
-
