@@ -7,9 +7,7 @@
   },
   "include": [
     "api/mcp.ts",
-    "src/mcpHandler.ts",
-    "src/types/**/*.ts",
-    "src/utils/**/*.ts"
+    "src/mcpHandler.ts"
   ],
   "exclude": [
     "dist",
