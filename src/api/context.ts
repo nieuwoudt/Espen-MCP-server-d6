@@ -108,7 +108,8 @@ export async function contextRoute(fastify: FastifyInstance) {
 
       const response: ContextResponse = {
         success: true,
-        data: mockContext,
+        // buildMockContext default branch returns partial base shape; cast until real builder ships
+        data: mockContext as ContextResponse['data'],
         cached: !query.forceRefresh,
         generatedAt: new Date().toISOString(),
         expiresAt: new Date(Date.now() + 5 * 60 * 1000).toISOString(), // 5 minutes
