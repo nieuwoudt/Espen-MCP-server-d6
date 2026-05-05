@@ -1,6 +1,6 @@
 # Espen D6 MCP Server — Architecture & Developer Reference
 
-*Last Updated: April 9, 2026*
+*Last Updated: April 21, 2026*
 
 This document answers the core technical questions about the Espen D6 MCP server: what it is, how it's built, how auth works, what tools exist, and where data comes from. Keep this updated as the architecture evolves.
 
@@ -323,3 +323,52 @@ curl -X POST https://espen-mcp-server-d6.vercel.app/sse \
     "id": 1
   }'
 ```
+
+---
+
+## 10. Change log — Admin+ absentees & discipline (2026-04-21)
+
+### What changed
+
+| Area | Detail |
+|------|--------|
+| **New MCP tools** | `get_learner_absentees` → D6 `GET /v1/adminplus/learnerabsentees/{school_login_id}`. `get_learner_discipline` → D6 `GET /v1/adminplus/learnerdiscipline/{school_login_id}`. Official docs: [absentees](https://apidocs.d6plus.co.za/reference/administration+/learner/get-learner-absentees), [discipline](https://apidocs.d6plus.co.za/reference/administration+/learner/get-learner-discipline). |
+| **Arguments** | `school_login_id` (via existing resolver / default). Optional `learner_id`. Optional `from_date` + `to_date` (`YYYY-MM-DD`) **together**; range **≤ 31 days** (validated before calling D6). Omit dates for D6 default window (last month). |
+| **Response shape** | JSON string: `{ tool, school_login_id, school_name, query, record_count, records }`. D6 HTTP **404** (“no records”) is returned as **`record_count: 0`** / empty `records`, not a thrown error. |
+| **Mock mode** | `D6_MOCK_MODE=true`: synthetic rows for local testing without D6. |
+
+### Build & repo fixes (same release)
+
+| Item | Reason |
+|------|--------|
+| **`tsconfig.vercel.json`** | Standalone config compiling only `api/mcp.ts` + `src/mcpHandler.ts`, so Vercel does not typecheck unrelated Fastify/legacy entrypoints during `npm run build`. |
+| **`src/api/context.ts`** | `data: mockContext as ContextResponse['data']` so `buildMockContext` default branch type-checks (required for Vercel’s TypeScript step when that file is part of the program). |
+
+### Vercel project name (important)
+
+Production MCP with **D6 secrets** lives under Vercel project **`espen-mcp-server-d6`** (team **`finfy-ai`**), URL **`https://espen-mcp-server-d6.vercel.app`**.
+
+The CLI may auto-link to a **different** project name (`espen-d6-mcp-server`) which **does not** carry the same env vars. Link explicitly before deploy:
+
+```bash
+vercel link --yes --scope finfy-ai --project espen-mcp-server-d6
+vercel deploy --prod --yes
+```
+
+### How it was tested (2026-04-21)
+
+All calls: `POST https://espen-mcp-server-d6.vercel.app/sse`, JSON-RPC `tools/call`.
+
+| Test | Result |
+|------|--------|
+| `tools/list` | **24** tools; includes `get_learner_absentees` and `get_learner_discipline`. |
+| `get_learner_absentees` `{ "school_login_id": 1352 }` | Live D6 data; **631** absence rows (Laerskool Monumentpark). |
+| `get_learner_discipline` `{ "school_login_id": 1352 }` | Live D6 data; **252** discipline rows (same school). |
+| Per-learner window `2026-04-01`–`2026-04-30`, `learner_id` **5484** | **2** absence rows (illness); **2** discipline rows (positive behaviour entries). |
+
+### Operational notes
+
+- **Browser root URL** may show **404** — there is no marketing page. MCP clients must use **`/sse`** (or `/mcp`, rewritten to the same Edge handler).
+- **`GET /health`** may fail on some Edge deployments; rely on **`tools/call`** / `get_system_health` for live checks if needed.
+- **Downstream clients** (e.g. Espen OS `D6_MCP_URL`): point at `https://espen-mcp-server-d6.vercel.app` if using Vercel instead of the Cloudflare Worker URL (client code appends `/sse`).
+- **Git**: commits on `main` include feature + tsconfig + context fix; push triggers GitHub → Vercel if connected.

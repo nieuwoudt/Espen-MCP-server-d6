@@ -8,13 +8,20 @@
 
 ## 🎯 **LIVE PRODUCTION SERVER**
 
-**🌐 Remote MCP Server**: https://espen-d6-mcp-remote.niev.workers.dev  
+**🌐 Vercel (primary, D6 secrets):** https://espen-mcp-server-d6.vercel.app/sse  
+**🌐 Cloudflare Worker (legacy):** https://espen-d6-mcp-remote.niev.workers.dev/sse  
 **📊 Status**: ✅ **FULLY OPERATIONAL**  
-**🛠️ Tools Available**: 13 optimized MCP tools  
-**📈 Performance**: 37x optimized for Claude Desktop  
-**🌍 Deployment**: Global Cloudflare Workers network  
+**🛠️ Tools available**: **24** MCP tools (see `MCP_SERVER_ARCHITECTURE.md`)  
+**📈 Performance**: Optimized filtered tools for large datasets  
+**🌍 Deployment**: Vercel Edge + Cloudflare Workers  
+
+### Recent updates (2026-04-21)
+
+- **Admin+ pastoral APIs** are exposed as MCP tools: **`get_learner_absentees`** and **`get_learner_discipline`** (D6 routes `learnerabsentees` / `learnerdiscipline`). Deployed and verified on Vercel project **`espen-mcp-server-d6`** (`finfy-ai` team).
+- **Verified live** for `school_login_id` **1352** (full-school pulls + per-learner examples). Details, curl examples, Vercel CLI linking notes, and build fixes are in **`MCP_SERVER_ARCHITECTURE.md` §10**.
 
 ---
+
 
 ## 🏆 **MAJOR ACHIEVEMENTS**
 
@@ -34,9 +41,11 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 
 --- 
 
-## 🛠️ **13 OPTIMIZED MCP TOOLS**
+## 🛠️ **MCP TOOLS (24 total)**
 
-### 🎯 **Optimized Tools (NEW - Solves Claude Issues)**
+See **`MCP_SERVER_ARCHITECTURE.md`** for the full catalogue and D6 endpoint mapping. Summary below.
+
+### 🎯 **Optimized Tools (filtered responses)**
 | Tool | Purpose | Response Size | Example Usage |
 |------|---------|---------------|---------------|
 | `get_learners_by_language` | Students by home language | ~15KB | "Get Afrikaans learners" |
@@ -53,6 +62,15 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 | `get_learner_marks` | Academic records | Per student | ✅ Working |
 | `get_marks_for_learners` | Deterministic marks sync by learner IDs | Batch (50-100) | ✅ Recommended |
 | `get_all_marks` / `get_all_subjects` | Curriculum+ bulk | Sampling/debug | ⚠️ Non-authoritative. Returns `CURRPLUS_BULK_NOT_SUPPORTED` until D6 confirms bulk routes; if Curriculum+ is not enabled for a school, returns `{"data":[],"meta":{"module_enabled":false}}`. |
+
+### 🏫 **Admin+ pastoral (attendance & discipline)** — *added 2026-04-21*
+
+| Tool | Purpose | D6 API |
+|------|---------|--------|
+| `get_learner_absentees` | Per-school / per-learner absence rows (`absent_date`, `absent_reason`) | `/v1/adminplus/learnerabsentees/{school_login_id}` |
+| `get_learner_discipline` | Discipline incidents (category, reason, points, remarks, staff) | `/v1/adminplus/learnerdiscipline/{school_login_id}` |
+
+Optional: `learner_id`; `from_date` + `to_date` (max **31** days). Verified on **`espen-mcp-server-d6.vercel.app`** with live D6 credentials.
 
 ### 🔧 **System Tools**
 | Tool | Purpose | Output | Status |
