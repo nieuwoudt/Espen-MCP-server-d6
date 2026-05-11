@@ -305,6 +305,212 @@ function isD6EmptyNotFoundError(err: unknown): boolean {
   return /\b404\b/.test(msg);
 }
 
+// ---------------------------------------------------------------------------
+// Batch tools: pastoral (attendance + discipline)
+//
+// Consumer-facing shapes used by the Supabase ingestion script
+// (INSERT ... ON CONFLICT against learner_attendance_records / learner_discipline).
+// ---------------------------------------------------------------------------
+
+interface AttendanceRecord {
+  mcp_id: string;
+  source_sis: 'd6';
+  source_record_id?: string;
+  learner_id: string;
+  absent_date: string; // YYYY-MM-DD
+  absent_reason?: string;
+  reason_category?: 'illness' | 'family' | 'unknown' | 'other';
+  is_late: boolean;
+  reason_confirmed_by_parent: boolean;
+}
+
+interface DisciplineRecord {
+  mcp_id: string;
+  source_sis: 'd6';
+  source_record_id: string;
+  learner_id: string;
+  discipline_date: string; // YYYY-MM-DD
+  discipline_category?: string;
+  category_code?: string; // e.g. "1.04" if present in source
+  discipline_reason?: string;
+  discipline_remarks?: string;
+  discipline_points: number;
+  recorded_by?: string;
+}
+
+function toMcpId(schoolLoginId: number): string {
+  return `mcp-d6-${schoolLoginId}`;
+}
+
+// Rough SA-school term windows. Generous on both ends so we don't miss edge
+// captures around term boundaries; idempotent dedupe handles any overlap.
+const TERM_WINDOWS: Record<number, { startMonth: number; startDay: number; endMonth: number; endDay: number }> = {
+  1: { startMonth: 1, startDay: 1, endMonth: 4, endDay: 15 },
+  2: { startMonth: 4, startDay: 1, endMonth: 7, endDay: 15 },
+  3: { startMonth: 7, startDay: 1, endMonth: 10, endDay: 15 },
+  4: { startMonth: 10, startDay: 1, endMonth: 12, endDay: 31 },
+};
+
+function pad2(n: number): string {
+  return String(n).padStart(2, '0');
+}
+
+function fmtDate(d: Date): string {
+  return `${d.getUTCFullYear()}-${pad2(d.getUTCMonth() + 1)}-${pad2(d.getUTCDate())}`;
+}
+
+interface ResolvedRange {
+  from_date?: string;
+  to_date?: string;
+  error?: string;
+}
+
+/**
+ * Resolves the effective date range from caller inputs.
+ * Precedence: explicit from_date/to_date > (year + term) > year > omit (D6 default last month).
+ * Caps overall range at 366 days; sliceDateRangeIntoChunks then enforces ≤31-day windows.
+ */
+function resolveBatchDateRange(args: any): ResolvedRange {
+  const from_date = args?.from_date;
+  const to_date = args?.to_date;
+  const year = args?.year !== undefined ? Number(args.year) : undefined;
+  const term = args?.term !== undefined ? Number(args.term) : undefined;
+
+  if (from_date || to_date) {
+    if (!from_date || !to_date) {
+      return { error: 'Provide both from_date and to_date (YYYY-MM-DD), or omit both.' };
+    }
+    return { from_date, to_date };
+  }
+
+  if (year !== undefined && term !== undefined) {
+    if (!TERM_WINDOWS[term]) {
+      return { error: `Unknown term ${term}; expected 1, 2, 3, or 4.` };
+    }
+    const t = TERM_WINDOWS[term];
+    return {
+      from_date: `${year}-${pad2(t.startMonth)}-${pad2(t.startDay)}`,
+      to_date: `${year}-${pad2(t.endMonth)}-${pad2(t.endDay)}`,
+    };
+  }
+
+  if (year !== undefined) {
+    return { from_date: `${year}-01-01`, to_date: `${year}-12-31` };
+  }
+
+  return {};
+}
+
+/**
+ * Splits a date range into ≤ maxDays-day windows (inclusive), matching D6's 31-day rule.
+ */
+function sliceDateRangeIntoChunks(
+  from_date: string,
+  to_date: string,
+  maxDays = 31
+): Array<{ from_date: string; to_date: string }> {
+  const start = new Date(`${from_date}T00:00:00Z`);
+  const end = new Date(`${to_date}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) {
+    return [];
+  }
+  const windows: Array<{ from_date: string; to_date: string }> = [];
+  let cursor = new Date(start.getTime());
+  while (cursor <= end) {
+    const windowEnd = new Date(cursor.getTime());
+    windowEnd.setUTCDate(windowEnd.getUTCDate() + (maxDays - 1));
+    if (windowEnd > end) {
+      windowEnd.setTime(end.getTime());
+    }
+    windows.push({ from_date: fmtDate(cursor), to_date: fmtDate(windowEnd) });
+    cursor = new Date(windowEnd.getTime());
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return windows;
+}
+
+function classifyAbsenceReason(reason?: string): AttendanceRecord['reason_category'] {
+  if (!reason) return 'unknown';
+  const r = reason.toLowerCase();
+  if (/(ill|sick|flu|covid|fever|medical)/.test(r)) return 'illness';
+  if (/(family|funeral|bereave|death|responsibilit)/.test(r)) return 'family';
+  return 'other';
+}
+
+function detectIsLate(reason?: string): boolean {
+  return !!reason && /\blate\b/i.test(reason);
+}
+
+function extractCategoryCode(...fields: Array<string | undefined>): string | undefined {
+  for (const f of fields) {
+    if (!f) continue;
+    const m = f.match(/(\d+\.\d+)/);
+    if (m) return m[1];
+  }
+  return undefined;
+}
+
+function parsePointsToNumber(raw: unknown): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'string') {
+    const n = Number(raw.trim());
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function mapAbsenteeToRecord(
+  raw: any,
+  mcpId: string,
+  fallbackLearnerId: string
+): AttendanceRecord | null {
+  const absentDate = String(raw?.absent_date || raw?.absentDate || raw?.date || '').slice(0, 10);
+  if (!absentDate) return null;
+  const reason = raw?.absent_reason ?? raw?.absentReason ?? raw?.reason;
+  return {
+    mcp_id: mcpId,
+    source_sis: 'd6',
+    source_record_id: raw?.id !== undefined ? String(raw.id) : undefined,
+    learner_id: String(raw?.learner_id ?? raw?.learnerId ?? raw?.LearnerID ?? fallbackLearnerId),
+    absent_date: absentDate,
+    absent_reason: reason ? String(reason) : undefined,
+    reason_category: classifyAbsenceReason(reason ? String(reason) : undefined),
+    is_late: detectIsLate(reason ? String(reason) : undefined),
+    reason_confirmed_by_parent: false,
+  };
+}
+
+function mapDisciplineToRecord(
+  raw: any,
+  mcpId: string,
+  fallbackLearnerId: string
+): DisciplineRecord | null {
+  const disciplineDate = String(raw?.discipline_date || raw?.disciplineDate || raw?.date || '').slice(0, 10);
+  const id = raw?.id !== undefined ? String(raw.id) : undefined;
+  if (!disciplineDate || !id) return null;
+  const category = raw?.discipline_category ? String(raw.discipline_category) : undefined;
+  const reason = raw?.discipline_reason ? String(raw.discipline_reason) : undefined;
+  const remarks = raw?.discipline_remarks ? String(raw.discipline_remarks) : undefined;
+  return {
+    mcp_id: mcpId,
+    source_sis: 'd6',
+    source_record_id: id,
+    learner_id: String(raw?.learner_id ?? raw?.learnerId ?? raw?.LearnerID ?? fallbackLearnerId),
+    discipline_date: disciplineDate,
+    discipline_category: category,
+    category_code: extractCategoryCode(category, reason),
+    discipline_reason: reason,
+    discipline_remarks: remarks,
+    discipline_points: parsePointsToNumber(raw?.discipline_points),
+    recorded_by:
+      raw?.staff_member_id !== undefined
+        ? String(raw.staff_member_id)
+        : raw?.recorded_by !== undefined
+          ? String(raw.recorded_by)
+          : undefined,
+  };
+}
+
 interface LearnerMarksQueryParams {
   term?: number;
   academic_year?: number;
@@ -1242,6 +1448,52 @@ const MCP_TOOLS = [
         from_date: { type: "string", description: "Range start YYYY-MM-DD (requires to_date)" },
         to_date: { type: "string", description: "Range end YYYY-MM-DD (requires from_date)" }
       },
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learners_attendance_batch",
+    description:
+      "Batch sync for learner absenteeism. Fans out D6 Admin+ /learnerabsentees/{school_login_id} per learner_id (and per ≤31-day window when a longer date range is provided), dedupes by D6 record id, and returns rows pre-shaped for Espen's `learner_attendance_records` schema. Idempotent: identical inputs return identical rows. Provide learner_ids (max 100). Date range can be supplied as (from_date+to_date), or as (year+term), or as year (full year), or omitted to fall back to D6's default last-month window. Mirrors get_marks_for_learners conventions (errors[] per learner, partial flag).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_id: { type: "integer", description: "Optional D6 school login ID (numeric); defaults to scoped/default school." },
+        learner_ids: {
+          type: "array",
+          items: { type: ["string", "number"] },
+          description: "Learner IDs to sync (max 100)."
+        },
+        year: { type: "integer", description: "Optional academic year (e.g. 2026). With term=N: restricted to that term's window." },
+        term: { type: "integer", description: "Optional term 1-4 (requires year)." },
+        from_date: { type: "string", description: "Optional range start YYYY-MM-DD (requires to_date)." },
+        to_date: { type: "string", description: "Optional range end YYYY-MM-DD (requires from_date)." },
+        include_meta: { type: "boolean", description: "Include synced_at timestamp in meta (default false).", default: false }
+      },
+      required: ["learner_ids"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "get_learners_discipline_batch",
+    description:
+      "Batch sync for learner discipline incidents. Fans out D6 Admin+ /learnerdiscipline/{school_login_id} per learner_id (and per ≤31-day window when a longer date range is provided), dedupes by D6 record id, and returns rows pre-shaped for Espen's `learner_discipline` schema. Idempotent. Provide learner_ids (max 100). Date range supplied as (from_date+to_date), (year+term), year, or omitted (D6 default last-month window). Mirrors get_marks_for_learners conventions.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        school_login_id: { type: "integer", description: "Optional D6 school login ID (numeric); defaults to scoped/default school." },
+        learner_ids: {
+          type: "array",
+          items: { type: ["string", "number"] },
+          description: "Learner IDs to sync (max 100)."
+        },
+        year: { type: "integer", description: "Optional academic year (e.g. 2026). With term=N: restricted to that term's window." },
+        term: { type: "integer", description: "Optional term 1-4 (requires year)." },
+        from_date: { type: "string", description: "Optional range start YYYY-MM-DD (requires to_date)." },
+        to_date: { type: "string", description: "Optional range end YYYY-MM-DD (requires from_date)." },
+        include_meta: { type: "boolean", description: "Include synced_at timestamp in meta (default false).", default: false }
+      },
+      required: ["learner_ids"],
       additionalProperties: false
     }
   }
@@ -2328,6 +2580,221 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
         null,
         2
       );
+    }
+
+    case 'get_learners_attendance_batch':
+    case 'get_learners_discipline_batch': {
+      const isAttendance = toolName === 'get_learners_attendance_batch';
+      const rawLearnerIds = args?.learner_ids;
+      const includeMeta = args?.include_meta === true;
+
+      const invalidPayload = (details: Record<string, unknown>) =>
+        JSON.stringify(
+          {
+            error_code: 'INVALID_LEARNER_IDS',
+            message:
+              'learner_ids must be a non-empty array of up to 100 string or number values.',
+            details,
+          },
+          null,
+          2
+        );
+
+      if (!Array.isArray(rawLearnerIds)) {
+        return invalidPayload({ reason: 'learner_ids_not_array' });
+      }
+
+      const normalizedLearnerIds = rawLearnerIds
+        .map((id: unknown) => {
+          if (typeof id === 'number' && Number.isFinite(id)) return String(id);
+          if (typeof id === 'string') {
+            const trimmed = id.trim();
+            return trimmed.length > 0 ? trimmed : null;
+          }
+          return null;
+        })
+        .filter((id): id is string => id !== null);
+
+      if (normalizedLearnerIds.length === 0) {
+        return invalidPayload({ reason: 'learner_ids_empty' });
+      }
+      if (normalizedLearnerIds.length !== rawLearnerIds.length) {
+        return invalidPayload({ reason: 'learner_ids_invalid_entry' });
+      }
+      if (normalizedLearnerIds.length > 100) {
+        return invalidPayload({
+          reason: 'learner_ids_too_many',
+          limit: 100,
+          received: normalizedLearnerIds.length,
+        });
+      }
+
+      const range = resolveBatchDateRange(args);
+      if (range.error) {
+        return JSON.stringify({ error_code: 'INVALID_DATE_RANGE', message: range.error }, null, 2);
+      }
+
+      const windows =
+        range.from_date && range.to_date
+          ? sliceDateRangeIntoChunks(range.from_date, range.to_date, 31)
+          : [{ from_date: undefined as unknown as string, to_date: undefined as unknown as string }];
+
+      if (range.from_date && range.to_date && windows.length === 0) {
+        return JSON.stringify(
+          {
+            error_code: 'INVALID_DATE_RANGE',
+            message: 'Could not slice date range; check from_date / to_date ordering.',
+          },
+          null,
+          2
+        );
+      }
+
+      const mcpId = toMcpId(schoolLoginId);
+      const attendances: AttendanceRecord[] = [];
+      const discipline: DisciplineRecord[] = [];
+      const seenAttendance = new Set<string>(); // key: source_record_id OR `${learner_id}|${absent_date}`
+      const seenDiscipline = new Set<string>(); // key: source_record_id
+      const errors: Array<{ learner_id: string; window?: { from_date: string; to_date: string }; error: string }> = [];
+
+      type WorkUnit = {
+        learner_id: string;
+        window: { from_date?: string; to_date?: string };
+      };
+      const work: WorkUnit[] = normalizedLearnerIds.flatMap((lid) =>
+        windows.map((w) => ({ learner_id: lid, window: w }))
+      );
+
+      const startTime = Date.now();
+      const budgetMs = 25000;
+      const perRequestTimeoutMs = 4000;
+      const concurrency = 5;
+      let timedOutEarly = false;
+      let successCount = 0;
+
+      if (!mockMode) {
+        await mapWithConcurrency(work, concurrency, async (unit) => {
+          if (timedOutEarly) return;
+          if (Date.now() - startTime > budgetMs) {
+            timedOutEarly = true;
+            return;
+          }
+          const query: AdminPlusLearnerPastoralQuery = { learner_id: Number(unit.learner_id) };
+          if (unit.window.from_date && unit.window.to_date) {
+            query.from_date = unit.window.from_date;
+            query.to_date = unit.window.to_date;
+          }
+          try {
+            let raw: unknown;
+            try {
+              raw = await withTimeout(
+                isAttendance
+                  ? getLearnerAbsenteesFromD6(env, schoolLoginId, query, `${toolName}:${unit.learner_id}`)
+                  : getLearnerDisciplineFromD6(env, schoolLoginId, query, `${toolName}:${unit.learner_id}`),
+                perRequestTimeoutMs,
+                `${toolName}:${unit.learner_id}`
+              );
+            } catch (err) {
+              if (isD6EmptyNotFoundError(err)) {
+                raw = [];
+              } else {
+                throw err;
+              }
+            }
+            const rows = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
+            for (const row of rows) {
+              if (isAttendance) {
+                const rec = mapAbsenteeToRecord(row, mcpId, unit.learner_id);
+                if (!rec) continue;
+                const key = rec.source_record_id ?? `${rec.learner_id}|${rec.absent_date}`;
+                if (seenAttendance.has(key)) continue;
+                seenAttendance.add(key);
+                attendances.push(rec);
+              } else {
+                const rec = mapDisciplineToRecord(row, mcpId, unit.learner_id);
+                if (!rec) continue;
+                if (seenDiscipline.has(rec.source_record_id)) continue;
+                seenDiscipline.add(rec.source_record_id);
+                discipline.push(rec);
+              }
+            }
+            successCount += 1;
+          } catch (err) {
+            errors.push({
+              learner_id: unit.learner_id,
+              window:
+                unit.window.from_date && unit.window.to_date
+                  ? { from_date: unit.window.from_date, to_date: unit.window.to_date }
+                  : undefined,
+              error: formatD6Error(err),
+            });
+          }
+        });
+      } else {
+        // Mock mode: synthesise a small deterministic sample per learner.
+        for (const lid of normalizedLearnerIds) {
+          if (isAttendance) {
+            attendances.push({
+              mcp_id: mcpId,
+              source_sis: 'd6',
+              source_record_id: `mock-abs-${lid}-1`,
+              learner_id: lid,
+              absent_date: '2026-04-10',
+              absent_reason: 'Illness',
+              reason_category: 'illness',
+              is_late: false,
+              reason_confirmed_by_parent: false,
+            });
+          } else {
+            discipline.push({
+              mcp_id: mcpId,
+              source_sis: 'd6',
+              source_record_id: `mock-disc-${lid}-1`,
+              learner_id: lid,
+              discipline_date: '2026-04-07',
+              discipline_category: 'General',
+              category_code: undefined,
+              discipline_reason: 'Is positief',
+              discipline_remarks: '',
+              discipline_points: 1,
+              recorded_by: '333',
+            });
+          }
+        }
+        successCount = normalizedLearnerIds.length * windows.length;
+      }
+
+      const durationMs = Date.now() - startTime;
+      const partial = timedOutEarly || errors.length > 0;
+      const meta: Record<string, unknown> = {
+        tool: toolName,
+        mode: 'by_ids',
+        school_login_id: schoolLoginId,
+        school_name: schoolName,
+        mcp_id: mcpId,
+        partial,
+        requested_learners_count: normalizedLearnerIds.length,
+        windows_count: windows.length,
+        successful_fetches: successCount,
+        errors_count: errors.length,
+        duration_ms: durationMs,
+      };
+      if (range.from_date && range.to_date) {
+        meta.range = { from_date: range.from_date, to_date: range.to_date };
+      }
+      if (includeMeta) {
+        meta.synced_at = new Date().toISOString();
+      }
+
+      const payload: Record<string, unknown> = isAttendance
+        ? { attendances, errors, meta }
+        : { discipline, errors, meta };
+
+      console.log(
+        `[${toolName}] school_login_id=${schoolLoginId} learners=${normalizedLearnerIds.length} windows=${windows.length} ` +
+          `rows=${isAttendance ? attendances.length : discipline.length} errors=${errors.length} duration_ms=${durationMs}`
+      );
+      return JSON.stringify(payload, null, 2);
     }
 
     default:
