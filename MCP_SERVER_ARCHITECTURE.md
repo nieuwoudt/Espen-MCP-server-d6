@@ -1,6 +1,6 @@
 # Espen D6 MCP Server — Architecture & Developer Reference
 
-*Last Updated: April 21, 2026*
+*Last Updated: May 11, 2026*
 
 This document answers the core technical questions about the Espen D6 MCP server: what it is, how it's built, how auth works, what tools exist, and where data comes from. Keep this updated as the architecture evolves.
 
@@ -119,7 +119,7 @@ This means `teacher_id` / `parent_id` / `learner_id` from the spec are **not yet
 
 ---
 
-## 4. MCP Tools (24 Total)
+## 4. MCP Tools (26 Total)
 
 All tools hit **D6 directly** at request time. None go through Supabase.
 
@@ -168,6 +168,8 @@ All tools hit **D6 directly** at request time. None go through Supabase.
 |---|------|-------------|-------|
 | 23 | `get_learner_absentees` | GET `/v1/adminplus/learnerabsentees/{id}` | Default: last month. Optional `learner_id`, `from_date`+`to_date` (max 31 days). [API ref](https://apidocs.d6plus.co.za/reference/administration+/learner/get-learner-absentees) |
 | 24 | `get_learner_discipline` | GET `/v1/adminplus/learnerdiscipline/{id}` | Same query rules as absentees. [API ref](https://apidocs.d6plus.co.za/reference/administration+/learner/get-learner-discipline) |
+| 25 | `get_learners_attendance_batch` | GET `/v1/adminplus/learnerabsentees/{id}` (fan-out) | **Batch sync tool**. Up to 100 `learner_ids` × ≤31-day windows. Returns `AttendanceRecord[]` pre-shaped for `learner_attendance_records` (mcp_id, source_sis='d6', source_record_id, reason_category, is_late, ...). Idempotent. |
+| 26 | `get_learners_discipline_batch` | GET `/v1/adminplus/learnerdiscipline/{id}` (fan-out) | **Batch sync tool**. Same fan-out and shape rules. Returns `DisciplineRecord[]` pre-shaped for `learner_discipline` (mcp_id, source_record_id, discipline_points as number, recorded_by from `staff_member_id`). Idempotent. |
 
 ### System Tools
 
@@ -372,3 +374,123 @@ All calls: `POST https://espen-mcp-server-d6.vercel.app/sse`, JSON-RPC `tools/ca
 - **`GET /health`** may fail on some Edge deployments; rely on **`tools/call`** / `get_system_health` for live checks if needed.
 - **Downstream clients** (e.g. Espen OS `D6_MCP_URL`): point at `https://espen-mcp-server-d6.vercel.app` if using Vercel instead of the Cloudflare Worker URL (client code appends `/sse`).
 - **Git**: commits on `main` include feature + tsconfig + context fix; push triggers GitHub → Vercel if connected.
+
+---
+
+## 11. Change log — Pastoral batch tools (2026-05-11)
+
+### What shipped
+
+| Tool | D6 routes | Purpose |
+|------|----------|---------|
+| `get_learners_attendance_batch` | `GET /v1/adminplus/learnerabsentees/{school_login_id}` (per-learner fan-out, per ≤31-day window) | Bulk daily/term attendance sync. |
+| `get_learners_discipline_batch` | `GET /v1/adminplus/learnerdiscipline/{school_login_id}` (per-learner fan-out, per ≤31-day window) | Bulk daily/term discipline sync. |
+
+### Inputs (both tools)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `school_login_id` | integer? | Optional. Defaults to the scoped/default school. |
+| `learner_ids` | (string \| number)[] | **Required**. Max **100** per call. |
+| `year` | integer? | Together with `term`: restricts to that term window. Alone: full year. |
+| `term` | 1\|2\|3\|4 | Optional; ignored if `from_date`/`to_date` given. Term windows: T1 Jan 1 – Apr 15, T2 Apr 1 – Jul 15, T3 Jul 1 – Oct 15, T4 Oct 1 – Dec 31 (intentionally generous; idempotent dedupe handles overlap). |
+| `from_date` / `to_date` | string? (YYYY-MM-DD) | Provided together. Auto-sliced into ≤31-day windows; takes precedence over `year`/`term`. |
+| `include_meta` | boolean | When true, adds `meta.synced_at`. |
+
+### Behaviour
+
+- **Fan-out**: `(learner_id × window)` pairs are fetched with **concurrency=5**, **per-request timeout=4 s**, **total budget=25 s**.
+- **Errors are isolated** per learner in `errors[]`; the rest of the batch returns. `meta.partial` is `true` if the budget expired or any errors occurred.
+- **Idempotent**: rows are deduped by D6 `id` (`source_record_id`); attendance rows fall back to `(learner_id, absent_date)` if `id` is missing. Two identical calls return identical rows (verified live).
+- **D6 404 (no records)** → returned as empty for that fan-out; never an error.
+- **Mock mode** (`D6_MOCK_MODE=true`) returns one synthetic row per learner per tool — handy for consumer-side ingest tests.
+
+### Output shapes (consumer-ready)
+
+**`AttendanceRecord`** (one row per learner × date):
+
+```ts
+{
+  mcp_id: string;            // e.g. "mcp-d6-1819" for LS Brits
+  source_sis: "d6";
+  source_record_id?: string; // D6 row id when present
+  learner_id: string;
+  absent_date: string;       // YYYY-MM-DD
+  absent_reason?: string;
+  reason_category?: "illness" | "family" | "unknown" | "other"; // classified server-side
+  is_late: boolean;          // true if reason contains "late"
+  reason_confirmed_by_parent: boolean; // always false (D6 does not expose this)
+}
+```
+
+**`DisciplineRecord`** (one row per incident):
+
+```ts
+{
+  mcp_id: string;
+  source_sis: "d6";
+  source_record_id: string;  // required; key for ON CONFLICT in Espen DB
+  learner_id: string;
+  discipline_date: string;
+  discipline_category?: string;
+  category_code?: string;    // extracted only when reason/category contains "N.NN"
+  discipline_reason?: string;
+  discipline_remarks?: string;
+  discipline_points: number; // numeric parse of D6 "-1"/"1"/...
+  recorded_by?: string;      // D6 staff_member_id
+}
+```
+
+**Envelope:**
+
+```json
+{
+  "attendances": [/* AttendanceRecord[] */],
+  "errors": [{ "learner_id": "5484", "window": {"from_date":"...","to_date":"..."}, "error": "..." }],
+  "meta": {
+    "tool": "get_learners_attendance_batch",
+    "mode": "by_ids",
+    "school_login_id": 1352,
+    "school_name": "Laerskool Monumentpark",
+    "mcp_id": "mcp-d6-1352",
+    "partial": false,
+    "requested_learners_count": 3,
+    "windows_count": 4,
+    "successful_fetches": 12,
+    "errors_count": 0,
+    "duration_ms": 2324,
+    "range": { "from_date": "2026-04-01", "to_date": "2026-07-15" }
+  }
+}
+```
+
+Discipline tool returns the same envelope with `discipline: DisciplineRecord[]` instead of `attendances`.
+
+### Recommended caller pattern (Supabase ingest)
+
+```text
+For each school_login_id in whitelist:
+  Look up learner_ids for that school in Supabase.
+  Chunk into batches of 50–100.
+  For each batch + (year, term) pair you want to sync:
+    POST /sse  tools/call get_learners_attendance_batch
+    INSERT  ON CONFLICT (mcp_id, learner_id, absent_date, source_sis) DO NOTHING
+    POST /sse  tools/call get_learners_discipline_batch
+    INSERT  ON CONFLICT (mcp_id, source_record_id) DO NOTHING
+    If meta.partial: re-queue the batch.
+```
+
+At 700 learners × 60 schools × 4 terms with batch size 100, this is roughly **1,680** MCP calls per full nightly sync (4 terms × 60 schools × 7 batches), not 42 K per-learner calls. The MCP still fans out internally, but uses connection reuse and `concurrency=5`.
+
+### How it was tested (2026-05-11, production)
+
+All calls: `POST https://espen-mcp-server-d6.vercel.app/sse`, JSON-RPC `tools/call`.
+
+| Scenario | Result |
+|----------|--------|
+| `tools/list` | **26** tools; both batch tools present. |
+| Attendance batch — 3 learners (5484, 5922, 6273), school 1352, **year=2026, term=2** | 4 rows, 4 windows × 3 learners = **12** successful fetches, 0 errors, `mcp_id: mcp-d6-1352`, sample row passes the schema. |
+| Discipline batch — 3 learners (5484, 5042, 5066), school 1352, **2026-04-01 → 2026-04-30** | 5 rows, 0 errors, `discipline_points` is numeric, `recorded_by="333"` populated. |
+| **Idempotency** — same call twice, school 1352, learners (5484, 5922), April 2026 | Identical 3 rows, identical `source_record_id`s. |
+| **mcp_id end-to-end** — LS Brits (1819), 3 learners, **year=2026, term=2** | `meta.mcp_id = "mcp-d6-1819"`, all 8 rows carry `mcp_id: mcp-d6-1819`. |
+| **Bogus learner_id (`999999999`)** alongside valid ones | Valid rows still returned; no D6 error surfaced (404 → empty fan-out). |

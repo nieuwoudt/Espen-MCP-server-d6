@@ -1,10 +1,17 @@
 # Espen D6 MCP Server - Project Status Summary
 
-*Last Updated: April 21, 2026*
+*Last Updated: May 11, 2026*
+
+## 📝 Update — 2026-05-11 (pastoral batch tools)
+
+- **Shipped** batch MCP tools **`get_learners_attendance_batch`** and **`get_learners_discipline_batch`** mirroring the `get_marks_for_learners` pattern (input: `learner_ids[]` up to 100; optional `year`+`term` *or* `from_date`+`to_date`; fan-out per learner × ≤31-day window; concurrency 5; budget 25 s).
+- **Sync-ready output**: rows arrive pre-shaped for the Espen DB schema — `AttendanceRecord` (`mcp_id`, `source_sis: "d6"`, `source_record_id`, classified `reason_category`, `is_late`, ...) and `DisciplineRecord` (`mcp_id`, `source_record_id`, numeric `discipline_points`, `recorded_by` from `staff_member_id`). Consumer just writes `INSERT ... ON CONFLICT DO NOTHING`.
+- **Idempotent**: dedupe by D6 record id; verified two identical calls returned identical rows on production.
+- **Verified live** on `https://espen-mcp-server-d6.vercel.app/sse` for school **1352** (Monumentpark) and **1819** (LS Brits). Total tools now **26**. Full details in **`MCP_SERVER_ARCHITECTURE.md` §11**.
 
 ## 📝 Update — 2026-04-21
 
-- **Shipped** MCP tools **`get_learner_absentees`** and **`get_learner_discipline`** (D6 Admin+ `learnerabsentees` / `learnerdiscipline`). Total tools **24**.
+- **Shipped** MCP tools **`get_learner_absentees`** and **`get_learner_discipline`** (D6 Admin+ `learnerabsentees` / `learnerdiscipline`).
 - **Deployed & tested** on Vercel project **`espen-mcp-server-d6`** (`https://espen-mcp-server-d6.vercel.app/sse`). Confirmed live D6 responses for `school_login_id` **1352** (631 absence rows, 252 discipline rows full-school sample; per-learner **5484** in April 2026 window).
 - **Build hygiene:** standalone **`tsconfig.vercel.json`** (Edge bundle only); **`src/api/context.ts`** mock response typing fix for Vercel `tsc`.
 - **Deploy note:** use `vercel link --scope finfy-ai --project espen-mcp-server-d6` so CLI targets the project that holds **D6_API_USERNAME** / **D6_API_PASSWORD**. Full notes in **`MCP_SERVER_ARCHITECTURE.md` §10**.
@@ -15,7 +22,7 @@ Build an MCP (Model Context Protocol) server that connects Claude and Supabase s
 ## ✅ What's Complete & Working
 
 ### 1. MCP Server Infrastructure
-- **✅ Production MCP server** with **24 functional tools** on Vercel
+- **✅ Production MCP server** with **26 functional tools** on Vercel
 - **✅ Shared handler architecture** (`src/mcpHandler.ts`) — single source of truth for both Cloudflare and Vercel
 - **✅ Multi-school support** — 13 authorized schools via `D6_ALLOWED_SCHOOL_LOGIN_IDS`
 - **✅ Mock mode** for local development (`D6_MOCK_MODE=true`), disabled in production
@@ -29,7 +36,7 @@ Build an MCP (Model Context Protocol) server that connects Claude and Supabase s
 - **✅ Settings endpoints**: Client integrations, enable/disable, bulk activation
 - **✅ Primary school**: Laerskool Monumentpark (`school_login_id=1352`) — fully operational
 
-### 3. MCP Tools (24 Total)
+### 3. MCP Tools (26 Total)
 
 #### Core Data Tools
 | Tool | Purpose | Status |
@@ -69,11 +76,13 @@ Build an MCP (Model Context Protocol) server that connects Claude and Supabase s
 | `get_system_health` | API health check with response time | ✅ Working |
 | `get_integration_info` | Integration config details | ✅ Working |
 
-#### Admin+ pastoral (2026-04-21)
+#### Admin+ pastoral
 | Tool | Purpose | Status |
 |------|---------|--------|
-| `get_learner_absentees` | Absence records (`absent_date`, `absent_reason`); optional `learner_id`, date range (≤31 days) | ✅ Production verified |
-| `get_learner_discipline` | Discipline records (category, reason, points, remarks); same optional filters | ✅ Production verified |
+| `get_learner_absentees` | Absence records (`absent_date`, `absent_reason`); optional `learner_id`, date range (≤31 days) | ✅ Production verified (2026-04-21) |
+| `get_learner_discipline` | Discipline records (category, reason, points, remarks); same optional filters | ✅ Production verified (2026-04-21) |
+| `get_learners_attendance_batch` | **Batch sync** by `learner_ids[]` (≤100); fan-out per learner × ≤31-day window; output is sync-shaped `AttendanceRecord[]` (mcp_id, source_sis, source_record_id, reason_category, is_late, …); idempotent | ✅ **NEW — Production verified (2026-05-11)** |
+| `get_learners_discipline_batch` | **Batch sync** by `learner_ids[]`; same fan-out and idempotency rules; output `DisciplineRecord[]` (mcp_id, source_record_id, numeric points, recorded_by) | ✅ **NEW — Production verified (2026-05-11)** |
 
 ### 4. `get_marks_for_learners` — Deterministic Batch Sync (NEW)
 
@@ -123,8 +132,9 @@ Claude / Sync Worker → POST /sse → Vercel Edge Function → Shared mcpHandle
 
 ### 6. Testing & Validation
 - **✅ TypeScript build** — `npm run build` passes cleanly (`tsconfig.vercel.json` scoped to Edge handler)
-- **✅ Production runtime** — `tools/list` returns **24** tools on `espen-mcp-server-d6.vercel.app`
+- **✅ Production runtime** — `tools/list` returns **26** tools on `espen-mcp-server-d6.vercel.app`
 - **✅ Real D6 data** — school **1352**: `get_learner_absentees` / `get_learner_discipline` return live rows; sample learner **5484** April 2026 has both absence and discipline rows
+- **✅ Batch tools** — `get_learners_attendance_batch` / `get_learners_discipline_batch` verified live on schools **1352** and **1819**: correct `mcp_id` mapping (`mcp-d6-{school_login_id}`), per-learner errors isolated, identical calls return identical rows (idempotent)
 - **✅ Multi-school** — school whitelist + name mapping via environment variables
 
 ## 📊 Current Environment
@@ -143,7 +153,7 @@ Claude / Sync Worker → POST /sse → Vercel Edge Function → Shared mcpHandle
 ```
 espen-d6-mcp-server/
 ├── api/mcp.ts                     # Vercel Edge Function entry point
-├── src/mcpHandler.ts              # Shared MCP handler (24 tools, all logic)
+├── src/mcpHandler.ts              # Shared MCP handler (26 tools, all logic)
 ├── src/cloudflare-worker-minimal.ts  # Cloudflare Worker entry point
 ├── vercel.json                    # Vercel rewrites (/sse → /api/mcp)
 ├── tsconfig.vercel.json           # Build config for Vercel
@@ -166,14 +176,15 @@ espen-d6-mcp-server/
 7. **Do NOT use** `get_all_subjects` or `get_all_marks` for authoritative sync — they are stubs/sampling tools
 
 ### Remaining Work
-- [ ] **Supabase sync worker** — marks/subjects via `get_marks_for_learners` + `get_learner_subjects`; extend for **`get_learner_absentees` / `get_learner_discipline`** (respect **31-day** D6 window per call)
+- [ ] **Supabase sync worker** — pastoral batch ingestion via **`get_learners_attendance_batch`** + **`get_learners_discipline_batch`** (consumer ON CONFLICT DO NOTHING on `(mcp_id, learner_id, absent_date, source_sis)` and `(mcp_id, source_record_id)`)
+- [ ] **Supabase sync worker** — marks/subjects via `get_marks_for_learners` + `get_learner_subjects`
 - [ ] **Bulk subjects route** — confirm with D6 whether `GET /v1/currplus/subjects/{loginId}` exists; if so, wire up `getAllSubjectsFromD6` in the `get_all_subjects` handler
 - [ ] **Timeout/partial path** — runtime test with genuinely slow D6 responses
 - [ ] **Additional schools** — validate `get_marks_for_learners` across all 13 whitelisted schools
 - [ ] **Vercel Preview bypass** — configure `VERCEL_AUTOMATION_BYPASS_SECRET` for pre-merge testing
 
 ## 📈 Success Metrics
-- ✅ **MCP Server**: Production-ready (24/24 tools live on Vercel)
+- ✅ **MCP Server**: Production-ready (26/26 tools live on Vercel)
 - ✅ **Authentication**: Working with production integrator
 - ✅ **Data Access**: Full AdminPlus (incl. absentees/discipline) + Curriculum+ for school 1352
 - ✅ **Batch Sync**: `get_marks_for_learners` validated on real data

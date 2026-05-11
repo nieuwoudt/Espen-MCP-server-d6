@@ -11,14 +11,21 @@
 **🌐 Vercel (primary, D6 secrets):** https://espen-mcp-server-d6.vercel.app/sse  
 **🌐 Cloudflare Worker (legacy):** https://espen-d6-mcp-remote.niev.workers.dev/sse  
 **📊 Status**: ✅ **FULLY OPERATIONAL**  
-**🛠️ Tools available**: **24** MCP tools (see `MCP_SERVER_ARCHITECTURE.md`)  
+**🛠️ Tools available**: **26** MCP tools (see `MCP_SERVER_ARCHITECTURE.md`)  
 **📈 Performance**: Optimized filtered tools for large datasets  
 **🌍 Deployment**: Vercel Edge + Cloudflare Workers  
 
-### Recent updates (2026-04-21)
+### Recent updates
 
-- **Admin+ pastoral APIs** are exposed as MCP tools: **`get_learner_absentees`** and **`get_learner_discipline`** (D6 routes `learnerabsentees` / `learnerdiscipline`). Deployed and verified on Vercel project **`espen-mcp-server-d6`** (`finfy-ai` team).
-- **Verified live** for `school_login_id` **1352** (full-school pulls + per-learner examples). Details, curl examples, Vercel CLI linking notes, and build fixes are in **`MCP_SERVER_ARCHITECTURE.md` §10**.
+**2026-05-11 — pastoral batch tools (sync-ready)**
+
+- **`get_learners_attendance_batch`** and **`get_learners_discipline_batch`** mirror the `get_marks_for_learners` batch pattern: up to 100 `learner_ids` per call, optional `(year, term)` *or* `(from_date, to_date)`, fan-out per learner + ≤31-day window, idempotent dedupe, per-learner errors isolated.
+- Output is **pre-shaped** for Espen's `learner_attendance_records` / `learner_discipline` schemas (`mcp_id = mcp-d6-{school_login_id}`, `source_sis = "d6"`, classified `reason_category`, numeric `discipline_points`, `recorded_by` from `staff_member_id`). Consumer just runs `INSERT ... ON CONFLICT DO NOTHING`.
+- Live-verified on production for schools **1352** (Monumentpark) and **1819** (LS Brits). See **`MCP_SERVER_ARCHITECTURE.md` §11**.
+
+**2026-04-21 — Admin+ pastoral single-call tools**
+
+- **`get_learner_absentees`** and **`get_learner_discipline`** (D6 routes `learnerabsentees` / `learnerdiscipline`). Deployed and verified on Vercel project **`espen-mcp-server-d6`** (`finfy-ai` team). Details in **`MCP_SERVER_ARCHITECTURE.md` §10**.
 
 ---
 
@@ -41,7 +48,7 @@ Live Cloudflare Workers deployment with enterprise-grade reliability, automatic 
 
 --- 
 
-## 🛠️ **MCP TOOLS (24 total)**
+## 🛠️ **MCP TOOLS (26 total)**
 
 See **`MCP_SERVER_ARCHITECTURE.md`** for the full catalogue and D6 endpoint mapping. Summary below.
 
@@ -63,14 +70,16 @@ See **`MCP_SERVER_ARCHITECTURE.md`** for the full catalogue and D6 endpoint mapp
 | `get_marks_for_learners` | Deterministic marks sync by learner IDs | Batch (50-100) | ✅ Recommended |
 | `get_all_marks` / `get_all_subjects` | Curriculum+ bulk | Sampling/debug | ⚠️ Non-authoritative. Returns `CURRPLUS_BULK_NOT_SUPPORTED` until D6 confirms bulk routes; if Curriculum+ is not enabled for a school, returns `{"data":[],"meta":{"module_enabled":false}}`. |
 
-### 🏫 **Admin+ pastoral (attendance & discipline)** — *added 2026-04-21*
+### 🏫 **Admin+ pastoral (attendance & discipline)**
 
-| Tool | Purpose | D6 API |
-|------|---------|--------|
-| `get_learner_absentees` | Per-school / per-learner absence rows (`absent_date`, `absent_reason`) | `/v1/adminplus/learnerabsentees/{school_login_id}` |
-| `get_learner_discipline` | Discipline incidents (category, reason, points, remarks, staff) | `/v1/adminplus/learnerdiscipline/{school_login_id}` |
+| Tool | Purpose | D6 API | Added |
+|------|---------|--------|-------|
+| `get_learner_absentees` | Per-school / per-learner absence rows (`absent_date`, `absent_reason`) | `/v1/adminplus/learnerabsentees/{school_login_id}` | 2026-04-21 |
+| `get_learner_discipline` | Discipline incidents (category, reason, points, remarks, staff) | `/v1/adminplus/learnerdiscipline/{school_login_id}` | 2026-04-21 |
+| **`get_learners_attendance_batch`** | **Batch sync** — `learner_ids[]` × optional year/term/date range. Output is pre-shaped `AttendanceRecord[]` (mcp_id, source_sis, source_record_id, reason_category, is_late, ...). Idempotent. | `/v1/adminplus/learnerabsentees/{id}` (fan-out, ≤31-day windows) | **2026-05-11** |
+| **`get_learners_discipline_batch`** | **Batch sync** — same input pattern, returns `DisciplineRecord[]` (mcp_id, source_record_id, numeric points, recorded_by). Idempotent. | `/v1/adminplus/learnerdiscipline/{id}` (fan-out) | **2026-05-11** |
 
-Optional: `learner_id`; `from_date` + `to_date` (max **31** days). Verified on **`espen-mcp-server-d6.vercel.app`** with live D6 credentials.
+Optional filters: `learner_id` (single-call tools), `learner_ids[]` (batch tools, ≤100), `from_date` + `to_date` (≤31-day per D6 call; batch tools auto-slice longer ranges). Verified on **`espen-mcp-server-d6.vercel.app`** with live D6 credentials.
 
 ### 🔧 **System Tools**
 | Tool | Purpose | Output | Status |
