@@ -12,6 +12,7 @@ compatibility_date = "2024-07-22"
 # Required secrets:
 # D6_API_USERNAME
 # D6_API_PASSWORD
+# D6_ADMIN_SECRET  (without it enable_d6_client and bulk_enable_d6_schools are refused for everyone)
 
 [vars]
 D6_API_BASE_URL = "https://integrate.d6plus.co.za/api"

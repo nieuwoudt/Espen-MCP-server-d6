@@ -65,8 +65,8 @@ Build an MCP (Model Context Protocol) server that connects Claude and Supabase s
 |------|---------|--------|
 | `d6_get_school_info` | Direct D6 AdminPlus school info | ✅ Working |
 | `d6_get_learners` | Direct D6 AdminPlus learners | ✅ Working |
-| `enable_d6_client` | Enable/disable D6 client integration | ✅ Working |
-| `bulk_enable_d6_schools` | Batch school activation | ✅ Working |
+| `enable_d6_client` | Enable/disable D6 client integration | ✅ Working (admin: requires `Authorization: Bearer <D6_ADMIN_SECRET>`) |
+| `bulk_enable_d6_schools` | Batch school activation | ✅ Working (admin: requires `Authorization: Bearer <D6_ADMIN_SECRET>`) |
 | `list_d6_schools` | List integrator's schools (filtered) | ✅ Working |
 
 #### System Tools
