@@ -1381,7 +1381,7 @@ const MCP_TOOLS = [
         school_login_ids: {
           type: "array",
           items: { type: "integer" },
-          description: "Array of school login IDs to activate. If not provided, uses D6_ALLOWED_SCHOOL_LOGIN_IDS."
+          description: "Array of school login IDs to activate. Every ID must be in D6_ALLOWED_SCHOOL_LOGIN_IDS, or nothing is changed. If not provided, uses D6_ALLOWED_SCHOOL_LOGIN_IDS."
         },
         api_type_id: {
           type: "integer",
@@ -1512,7 +1512,9 @@ const MCP_TOOLS = [
 // still works without a header.
 //
 // The gate fails closed: a server with no D6_ADMIN_SECRET, a caller that passes
-// no auth context, a missing header and a wrong secret are all refused.
+// no auth context, a missing header and a wrong secret are all refused. Once
+// past the gate, the admin tools only touch schools on a non-empty
+// D6_ALLOWED_SCHOOL_LOGIN_IDS (see assertAdminSchoolsAllowed).
 // ---------------------------------------------------------------------------
 export const ADMIN_TOOLS: ReadonlySet<string> = new Set(['enable_d6_client', 'bulk_enable_d6_schools']);
 
@@ -1525,12 +1527,23 @@ export interface RequestAuth {
 
 const UNAUTHENTICATED: RequestAuth = { admin: false };
 
+const isAdminToolName = (name: unknown): boolean => typeof name === 'string' && ADMIN_TOOLS.has(name);
+
 // Deliberately says nothing about whether a secret is configured or what was sent.
 export class AdminUnauthorizedError extends Error {
   constructor() {
     super('unauthorized: this tool requires admin authentication');
     this.name = 'AdminUnauthorizedError';
   }
+}
+
+/**
+ * Logs the refusal and returns the error to throw or report. The log line names
+ * the tool only: no header content, and nothing about whether a secret is set.
+ */
+function refuseAdminTool(toolName: string): AdminUnauthorizedError {
+  console.warn(`[AUTH] refused admin tool ${toolName}`);
+  return new AdminUnauthorizedError();
 }
 
 async function sha256(value: string): Promise<Uint8Array> {
@@ -1543,18 +1556,57 @@ async function sha256(value: string): Promise<Uint8Array> {
  * header only, never from the URL or the body. Both values are hashed with
  * SHA-256 and the fixed-length digests compared in constant time. Web Crypto
  * only, so it runs on the edge runtime.
+ *
+ * Both values are hashed on every call, even when the secret or the header is
+ * missing, so the response time does not reveal whether a secret is configured.
+ * Any failure (for example a runtime without Web Crypto) counts as "not admin".
  */
 export async function isAdminRequest(request: Request, env: EnvLike): Promise<boolean> {
-  // Trimmed because HTTP header values cannot carry surrounding whitespace, so
-  // e.g. a trailing newline in the stored value could never match.
-  const secret = (env.D6_ADMIN_SECRET ?? '').trim();
-  const match = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') ?? '');
-  if (!secret || !match) return false;
+  try {
+    // Trimmed because HTTP header values cannot carry surrounding whitespace, so
+    // e.g. a trailing newline in the stored value could never match.
+    const secret = (env.D6_ADMIN_SECRET ?? '').trim();
+    const match = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') ?? '');
 
-  const [expected, presented] = await Promise.all([sha256(secret), sha256(match[1])]);
-  let diff = 0;
-  for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ presented[i];
-  return diff === 0;
+    const [expected, presented] = await Promise.all([sha256(secret), sha256(match?.[1] ?? '')]);
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ presented[i];
+    return secret.length > 0 && match !== null && diff === 0;
+  } catch {
+    console.warn('[AUTH] admin check failed; treating the request as unauthenticated');
+    return false;
+  }
+}
+
+/**
+ * The HTTP layer only resolves admin auth where it changes the answer: tools/list
+ * and a tools/call of an admin tool. Every other request skips the hashing, so
+ * nothing in it can affect the non-admin tools.
+ */
+function needsAdminAuth(request: any): boolean {
+  return (
+    request?.method === 'tools/list' ||
+    (request?.method === 'tools/call' && isAdminToolName(request?.params?.name))
+  );
+}
+
+/**
+ * Admin tools only switch schools on D6_ALLOWED_SCHOOL_LOGIN_IDS. Unlike the read
+ * tools, an unset or empty allow-list refuses every school instead of allowing all
+ * of them, and a list with any school not on it is refused as a whole.
+ */
+function assertAdminSchoolsAllowed(env: EnvLike, schoolIds: number[]): void {
+  const allowed = parseAllowedSchools(env);
+  if (allowed.length === 0) {
+    throw new Error('D6_ALLOWED_SCHOOL_LOGIN_IDS is empty, so admin tools cannot switch any school.');
+  }
+  const refused = schoolIds.filter((id) => !allowed.includes(id));
+  if (refused.length === 1) {
+    throw new Error(`School login id ${refused[0]} is not in D6_ALLOWED_SCHOOL_LOGIN_IDS.`);
+  }
+  if (refused.length > 1) {
+    throw new Error(`School login ids ${refused.join(', ')} are not in D6_ALLOWED_SCHOOL_LOGIN_IDS.`);
+  }
 }
 
 // Tool Handlers
@@ -1567,8 +1619,11 @@ async function handleToolCall(
 ): Promise<string> {
   // Admin gate (see "Admin tool authentication" above). Runs before the school
   // allow-list and the mock-mode guards, and fails closed when no auth is passed.
-  if (ADMIN_TOOLS.has(toolName) && auth.admin !== true) {
-    throw new AdminUnauthorizedError();
+  if (ADMIN_TOOLS.has(toolName)) {
+    if (auth.admin !== true) {
+      throw refuseAdminTool(toolName);
+    }
+    console.log(`[AUTH] admin tool allowed ${toolName}`);
   }
 
   const mockMode = isMockMode(env);
@@ -2339,7 +2394,7 @@ async function handleToolCall(
       }
       
       try {
-        assertSchoolAllowed(env, targetSchoolId);
+        assertAdminSchoolsAllowed(env, [targetSchoolId]);
         const targetSchoolName = getSchoolName(env, targetSchoolId);
         
         logToolInvocation('enable_d6_client', mockMode, { 
@@ -2387,6 +2442,14 @@ async function handleToolCall(
         }
       } else {
         return '❌ Either provide school_login_ids array or set use_whitelist=true';
+      }
+
+      // Every school must be on the allow-list, including explicit school_login_ids.
+      // One school that is not refuses the whole call before any PATCH is sent.
+      try {
+        assertAdminSchoolsAllowed(env, schoolIds);
+      } catch (error) {
+        return `❌ ${formatD6Error(error)} No school was changed.`;
       }
 
       try {
@@ -2878,6 +2941,20 @@ async function handleMCPRequest(
   env: EnvLike,
   auth: RequestAuth = UNAUTHENTICATED
 ): Promise<MCPResponse> {
+  // Admin gate first, so an unauthenticated admin call always gets -32001 (and
+  // HTTP 401), even where the production mock-mode guard below would answer.
+  // handleToolCall repeats the gate for callers that don't come through here.
+  if (request?.method === 'tools/call' && isAdminToolName(request.params?.name) && auth.admin !== true) {
+    return {
+      jsonrpc: '2.0',
+      id: request.id,
+      error: {
+        code: UNAUTHORIZED_ERROR_CODE,
+        message: refuseAdminTool(request.params.name).message,
+      },
+    };
+  }
+
   // Production safeguard: prevent mock mode in production
   const mockMode = env.D6_MOCK_MODE === 'true';
   if ((env.NODE_ENV === 'production' || env.ESPEN_ENV === 'production') && mockMode) {
@@ -3049,7 +3126,9 @@ export async function handleMcpRequest(request: Request, env: EnvLike): Promise<
     if (request.method === 'POST') {
       try {
         const mcpRequest: MCPRequest = await request.json();
-        const auth: RequestAuth = { admin: await isAdminRequest(request, env) };
+        const auth: RequestAuth = {
+          admin: needsAdminAuth(mcpRequest) ? await isAdminRequest(request, env) : false,
+        };
         const mcpResponse = await handleMCPRequest(mcpRequest, env, auth);
         const unauthorized = mcpResponse.error?.code === UNAUTHORIZED_ERROR_CODE;
 
