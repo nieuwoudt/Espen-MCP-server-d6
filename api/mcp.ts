@@ -20,6 +20,7 @@ export default async function handler(req: Request): Promise<Response> {
     D6_SCHOOL_MAP: process.env.D6_SCHOOL_MAP,
     NODE_ENV: process.env.NODE_ENV,
     ESPEN_ENV: process.env.ESPEN_ENV,
+    D6_ADMIN_SECRET: process.env.D6_ADMIN_SECRET,
   };
 
   return handleMcpRequest(req, env);

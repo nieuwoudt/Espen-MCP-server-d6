@@ -12,6 +12,8 @@ export interface EnvLike {
   D6_SCHOOL_MAP?: string;
   NODE_ENV?: string;
   ESPEN_ENV?: string;
+  /** Bearer secret for the admin tools (see ADMIN_TOOLS). Unset or empty disables them for everyone. */
+  D6_ADMIN_SECRET?: string;
 }
 
 interface MCPRequest {
@@ -1499,8 +1501,76 @@ const MCP_TOOLS = [
   }
 ];
 
+// ---------------------------------------------------------------------------
+// Admin tool authentication
+//
+// enable_d6_client and bulk_enable_d6_schools switch a school's D6 data access
+// on or off (PATCH /v1/settings/clients/{id}). On 2026-09-15 we confirmed that
+// anyone with this server's URL could call them with no credentials (Laerskool
+// Bergsig was switched on that way), so they now require the HTTP header
+// "Authorization: Bearer <D6_ADMIN_SECRET>". Every other tool is unchanged and
+// still works without a header.
+//
+// The gate fails closed: a server with no D6_ADMIN_SECRET, a caller that passes
+// no auth context, a missing header and a wrong secret are all refused.
+// ---------------------------------------------------------------------------
+export const ADMIN_TOOLS: ReadonlySet<string> = new Set(['enable_d6_client', 'bulk_enable_d6_schools']);
+
+export const UNAUTHORIZED_ERROR_CODE = -32001;
+
+/** What the HTTP layer established about the caller. Omitted means unauthenticated. */
+export interface RequestAuth {
+  admin: boolean;
+}
+
+const UNAUTHENTICATED: RequestAuth = { admin: false };
+
+// Deliberately says nothing about whether a secret is configured or what was sent.
+export class AdminUnauthorizedError extends Error {
+  constructor() {
+    super('unauthorized: this tool requires admin authentication');
+    this.name = 'AdminUnauthorizedError';
+  }
+}
+
+async function sha256(value: string): Promise<Uint8Array> {
+  return new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value)));
+}
+
+/**
+ * True only when the server has a non-empty D6_ADMIN_SECRET and the request
+ * carries it as "Authorization: Bearer <secret>". The secret is read from that
+ * header only, never from the URL or the body. Both values are hashed with
+ * SHA-256 and the fixed-length digests compared in constant time. Web Crypto
+ * only, so it runs on the edge runtime.
+ */
+export async function isAdminRequest(request: Request, env: EnvLike): Promise<boolean> {
+  // Trimmed because HTTP header values cannot carry surrounding whitespace, so
+  // e.g. a trailing newline in the stored value could never match.
+  const secret = (env.D6_ADMIN_SECRET ?? '').trim();
+  const match = /^Bearer\s+(.+)$/i.exec(request.headers.get('authorization') ?? '');
+  if (!secret || !match) return false;
+
+  const [expected, presented] = await Promise.all([sha256(secret), sha256(match[1])]);
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= expected[i] ^ presented[i];
+  return diff === 0;
+}
+
 // Tool Handlers
-async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedSchoolId?: string): Promise<string> {
+async function handleToolCall(
+  toolName: string,
+  args: any,
+  env: EnvLike,
+  scopedSchoolId?: string,
+  auth: RequestAuth = UNAUTHENTICATED
+): Promise<string> {
+  // Admin gate (see "Admin tool authentication" above). Runs before the school
+  // allow-list and the mock-mode guards, and fails closed when no auth is passed.
+  if (ADMIN_TOOLS.has(toolName) && auth.admin !== true) {
+    throw new AdminUnauthorizedError();
+  }
+
   const mockMode = isMockMode(env);
   
   // Normalize school ID from various parameter names
@@ -2803,7 +2873,11 @@ async function handleToolCall(toolName: string, args: any, env: EnvLike, scopedS
 }
 
 // MCP Request Handler
-async function handleMCPRequest(request: MCPRequest, env: EnvLike): Promise<MCPResponse> {
+async function handleMCPRequest(
+  request: MCPRequest,
+  env: EnvLike,
+  auth: RequestAuth = UNAUTHENTICATED
+): Promise<MCPResponse> {
   // Production safeguard: prevent mock mode in production
   const mockMode = env.D6_MOCK_MODE === 'true';
   if ((env.NODE_ENV === 'production' || env.ESPEN_ENV === 'production') && mockMode) {
@@ -2855,14 +2929,14 @@ async function handleMCPRequest(request: MCPRequest, env: EnvLike): Promise<MCPR
         jsonrpc: '2.0',
         id: request.id,
         result: {
-          tools: MCP_TOOLS,
+          tools: auth.admin ? MCP_TOOLS : MCP_TOOLS.filter((tool) => !ADMIN_TOOLS.has(tool.name)),
         },
       };
 
     case 'tools/call':
       const { name: toolName, arguments: args } = request.params;
       try {
-        const result = await handleToolCall(toolName, args || {}, env);
+        const result = await handleToolCall(toolName, args || {}, env, undefined, auth);
         return {
           jsonrpc: '2.0',
           id: request.id,
@@ -2880,7 +2954,7 @@ async function handleMCPRequest(request: MCPRequest, env: EnvLike): Promise<MCPR
           jsonrpc: '2.0',
           id: request.id,
           error: {
-            code: -32603,
+            code: error instanceof AdminUnauthorizedError ? UNAUTHORIZED_ERROR_CODE : -32603,
             message: error instanceof Error ? error.message : 'Internal error',
           },
         };
@@ -2975,14 +3049,18 @@ export async function handleMcpRequest(request: Request, env: EnvLike): Promise<
     if (request.method === 'POST') {
       try {
         const mcpRequest: MCPRequest = await request.json();
-        const mcpResponse = await handleMCPRequest(mcpRequest, env);
-        
+        const auth: RequestAuth = { admin: await isAdminRequest(request, env) };
+        const mcpResponse = await handleMCPRequest(mcpRequest, env, auth);
+        const unauthorized = mcpResponse.error?.code === UNAUTHORIZED_ERROR_CODE;
+
         return new Response(JSON.stringify(mcpResponse), {
+          status: unauthorized ? 401 : 200,
           headers: {
             'Content-Type': 'application/json',
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': 'GET, POST, OPTIONS, HEAD',
             'Access-Control-Allow-Headers': 'Content-Type, Accept',
+            ...(unauthorized ? { 'WWW-Authenticate': 'Bearer' } : {}),
           },
         });
       } catch (error) {

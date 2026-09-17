@@ -15,6 +15,9 @@ interface Env {
   D6_SCHOOL_MAP?: string;
   NODE_ENV?: string;
   ESPEN_ENV?: string;
+  // Admin tools (enable_d6_client, bulk_enable_d6_schools) are refused unless this
+  // is set (wrangler secret put D6_ADMIN_SECRET) and sent as a Bearer token.
+  D6_ADMIN_SECRET?: string;
   // Legacy support
   D6_MONUMENTPARK_SCHOOL_LOGIN_ID?: string;
   ALLOWED_SCHOOL_IDS?: string;
