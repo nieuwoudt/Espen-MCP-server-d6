@@ -20,22 +20,24 @@ describe('bulk MCP tools (mock mode)', () => {
     expect(parsed.data.total).toBeGreaterThan(0);
   });
 
-  test('get_all_marks paginates with cursor and omits meta by default', async () => {
+  // Envelope since 67d0eae (guarded fallback): { data: [...], next_cursor, meta: { mode, ... } },
+  // with meta.synced_at only when include_meta is true.
+  test('get_all_marks paginates with cursor and omits synced_at by default', async () => {
     const firstPage = JSON.parse(
       await handleToolCall('get_all_marks', { limit: 10 }, baseEnv)
     );
 
-    expect(firstPage.meta).toBeUndefined();
-    expect(Array.isArray(firstPage.data.items)).toBe(true);
-    expect(firstPage.data.items.length).toBeGreaterThan(0);
+    expect(firstPage.meta?.synced_at).toBeUndefined();
+    expect(Array.isArray(firstPage.data)).toBe(true);
+    expect(firstPage.data.length).toBeGreaterThan(0);
 
-    const nextCursor = firstPage.data.next_cursor;
+    const nextCursor = firstPage.next_cursor;
     if (nextCursor) {
       const secondPage = JSON.parse(
         await handleToolCall('get_all_marks', { limit: 10, cursor: nextCursor }, baseEnv)
       );
-      expect(secondPage.data.total).toBe(firstPage.data.total);
-      expect(Array.isArray(secondPage.data.items)).toBe(true);
+      expect(Array.isArray(secondPage.data)).toBe(true);
+      expect(secondPage.data).not.toEqual(firstPage.data);
     }
   });
 
