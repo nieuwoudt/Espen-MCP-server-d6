@@ -4,6 +4,17 @@
 
 This document explains the D6 client integration enablement feature, which is required to activate certain D6 API features like assessment marks access.
 
+## Authentication (required)
+
+`enable_d6_client` switches a real school's D6 data access on or off, so it requires an admin secret. On 2026-09-15 we confirmed it could be called by anyone with the server URL; it has required the secret since.
+
+- Send the header `Authorization: Bearer <D6_ADMIN_SECRET>` with every call. The secret is accepted **only** from that header, never from the URL or the JSON body.
+- The secret lives in the `D6_ADMIN_SECRET` environment variable on the `espen-mcp-server-d6` Vercel project (espen-os holds the same value in its own `D6_ADMIN_SECRET`). Read it from there; never paste its value into docs, chat, tickets, logs or commits.
+- Without a valid secret the call gets **HTTP 401** and the JSON-RPC error `{"code": -32001, "message": "unauthorized: ..."}`. Nothing is sent to D6.
+- If `D6_ADMIN_SECRET` is unset or empty on the server, the tool is refused for everyone (fail closed).
+- `tools/list` only includes `enable_d6_client` (and `bulk_enable_d6_schools`) for a request that carries the secret, so an MCP client such as Claude will not see the tool unless it is configured to send the header.
+- Every other tool works as before without the header.
+
 ## Implementation Details
 
 ### Correct API Specification (Per Patrick from D6)
@@ -42,21 +53,27 @@ PATCH https://integrate.d6plus.co.za/api/v1/settings/clients/{school_id}
 - `1` = Enabled (activate the integration)
 - `0` = Disabled (deactivate the integration)
 
-## Usage from Claude
+## Usage
+
+The examples call the server over HTTP. `D6_MCP_URL` is the server's base URL and `D6_ADMIN_SECRET` is read from the Vercel project's environment variable of that name; neither value belongs in this document. An MCP client must send the same `Authorization` header.
 
 ### Step 1: Enable Client Integration
 
-First, enable the D6 client integration for a school:
+First, enable the D6 client integration for a school (this changes the school's real D6 access):
 
-```json
-{
-  "tool": "enable_d6_client",
-  "args": {
-    "school_login_id": 1352,
-    "api_type_id": 8,
-    "state": 1
-  }
-}
+```bash
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "enable_d6_client",
+      "arguments": { "school_login_id": 1352, "api_type_id": 8, "state": 1 }
+    }
+  }'
 ```
 
 **Expected Response:**
@@ -118,10 +135,11 @@ async function enableD6ClientIntegration(
 
 ### Key Features
 
-1. **School Whitelist Validation**: Checks that school is in `D6_ALLOWED_SCHOOL_LOGIN_IDS`
-2. **Mock Mode Protection**: Prevents use in mock/sandbox mode (production only)
-3. **Clear Logging**: `[D6 TRACE]` shows exact request and response status
-4. **Error Handling**: Surfaces D6 errors clearly for debugging
+1. **Admin Authentication**: Requires `Authorization: Bearer <D6_ADMIN_SECRET>` before anything else runs (see Authentication above)
+2. **School Whitelist Validation**: Checks that school is in `D6_ALLOWED_SCHOOL_LOGIN_IDS`
+3. **Mock Mode Protection**: Prevents use in mock/sandbox mode (production only)
+4. **Clear Logging**: `[D6 TRACE]` shows exact request and response status
+5. **Error Handling**: Surfaces D6 errors clearly for debugging
 
 ### Deprecated Code
 
@@ -151,9 +169,15 @@ This will:
 
 ### From Vercel
 
-Once deployed, you can test via Claude using the MCP tool as shown above.
+Once deployed, call the tool as shown in Usage above, with the `Authorization` header. This is not a dry run: it switches the school's D6 access on or off.
 
 ## Troubleshooting
+
+### Error: "unauthorized" (HTTP 401, JSON-RPC code -32001)
+
+**Cause:** The request had no `Authorization: Bearer ...` header, the secret did not match, or `D6_ADMIN_SECRET` is not set on the Vercel project (the response is deliberately the same in all three cases)
+
+**Solution:** Send the header with the value from the `D6_ADMIN_SECRET` environment variable on the Vercel project, and confirm the variable is set there
 
 ### Error: "School not allowed"
 
@@ -191,7 +215,7 @@ Once deployed, you can test via Claude using the MCP tool as shown above.
    ↓
 2. Add to D6_ALLOWED_SCHOOL_LOGIN_IDS
    ↓
-3. Call enable_d6_client tool
+3. Call enable_d6_client tool (with the Authorization header)
    ↓
 4. Wait 1-2 minutes
    ↓
@@ -204,26 +228,25 @@ Once deployed, you can test via Claude using the MCP tool as shown above.
 
 - **One-time operation**: Only needs to be run when onboarding a school or changing integration settings
 - **Not automatic**: Does not run on every marks request (by design)
-- **Admin operation**: Should be called manually or via admin interface
+- **Admin operation**: Should be called manually or via admin interface, always with `Authorization: Bearer <D6_ADMIN_SECRET>`
 - **Production only**: Will not work in mock/sandbox mode
 
 ## Example: Laerskool Monumentpark (1352)
 
 ```bash
-# Step 1: Enable client integration
-enable_d6_client({
-  school_login_id: 1352,
-  api_type_id: 8,
-  state: 1
-})
+# Step 1: Enable client integration (admin tool: needs the Authorization header)
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"enable_d6_client","arguments":{"school_login_id":1352,"api_type_id":8,"state":1}}}'
 
 # Expected: PATCH /v1/settings/clients/1352 -> 200
+# Without a valid secret: HTTP 401, {"error":{"code":-32001,"message":"unauthorized: ..."}}
 
-# Step 2: Test marks access
-get_learner_marks({
-  school_login_id: 1352,
-  learnerId: 3043
-})
+# Step 2: Test marks access (read tool: no Authorization header needed)
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_learner_marks","arguments":{"school_login_id":1352,"learnerId":3043}}}'
 
 # Expected: GET /v1/currplus/learnersubjectmarks/1352?learner_id=3043 -> 200
 ```

@@ -4,6 +4,21 @@
 
 This guide explains how to activate D6 client integrations for all 17 authorized schools at once using the `bulk_enable_d6_schools` MCP tool.
 
+> **Policy: Espen switches schools on one at a time.** `bulk_enable_d6_schools` is not to be run without a per-school decision for every school it would touch. Use `enable_d6_client` for each decided school instead. With `use_whitelist: true` the bulk tool switches every school in `D6_ALLOWED_SCHOOL_LOGIN_IDS` (61 schools as of 2026-09-15, not the 17 listed below).
+
+## Authentication (required)
+
+`bulk_enable_d6_schools` and `enable_d6_client` change real schools' D6 data access, so both require an admin secret. On 2026-09-15 we confirmed they could be called by anyone with the server URL; they have required the secret since.
+
+- Send the header `Authorization: Bearer <D6_ADMIN_SECRET>`. The secret is accepted **only** from that header, never from the URL or the JSON body.
+- The secret lives in the `D6_ADMIN_SECRET` environment variable on the `espen-mcp-server-d6` Vercel project (espen-os holds the same value in its own `D6_ADMIN_SECRET`). Never paste its value into docs, chat, tickets, logs or commits.
+- Without a valid secret the call gets **HTTP 401** and the JSON-RPC error `{"code": -32001, "message": "unauthorized: ..."}`, and nothing is sent to D6.
+- If `D6_ADMIN_SECRET` is unset or empty on the server, both tools are refused for everyone (fail closed).
+- `tools/list` only includes the two tools for a request that carries the secret.
+- Read tools such as `list_d6_schools` and `get_learners` need no header.
+
+The examples below call the server over HTTP. `D6_MCP_URL` is the server's base URL and `D6_ADMIN_SECRET` is read from the Vercel environment variable; neither value belongs in this document.
+
 ## Complete School List (17 Schools)
 
 | # | School Login ID | School Name | Contact Person | Status |
@@ -44,6 +59,10 @@ This guide explains how to activate D6 client integrations for all 17 authorized
 
 After updating, Vercel will auto-redeploy (takes 1-2 minutes).
 
+### 2. Confirm D6_ADMIN_SECRET Is Set
+
+`D6_ADMIN_SECRET` must be set on the `espen-mcp-server-d6` Vercel project, and you need its value in your shell as `$D6_ADMIN_SECRET`. Without it every call below is refused with HTTP 401.
+
 ## Usage
 
 ### Step 1: Check Current Activation Status
@@ -72,17 +91,21 @@ Showing X of Y schools (only_active=true, only_whitelisted=true)
 
 ### Step 2: Bulk Activate All Schools
 
-Activate all 17 schools at once:
+Only with a per-school decision for every allow-listed school (see Policy above). This activates every school in `D6_ALLOWED_SCHOOL_LOGIN_IDS` at once:
 
-```json
-{
-  "tool": "bulk_enable_d6_schools",
-  "args": {
-    "use_whitelist": true,
-    "api_type_id": 8,
-    "state": 1
-  }
-}
+```bash
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {
+      "name": "bulk_enable_d6_schools",
+      "arguments": { "use_whitelist": true, "api_type_id": 8, "state": 1 }
+    }
+  }'
 ```
 
 **Parameters:**
@@ -165,48 +188,39 @@ Pick a few newly activated schools and test data access:
 
 ### Activate Specific Schools Only
 
-Instead of all 17, activate just a subset:
+Instead of every allow-listed school, activate just a subset (each one still needs its own decision):
 
-```json
-{
-  "tool": "bulk_enable_d6_schools",
-  "args": {
-    "school_login_ids": [1479, 1430, 3652, 1431],
-    "api_type_id": 8,
-    "state": 1,
-    "use_whitelist": false
-  }
-}
+```bash
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bulk_enable_d6_schools","arguments":{"school_login_ids":[1479,1430,3652,1431],"api_type_id":8,"state":1,"use_whitelist":false}}}'
 ```
 
 ### Disable Schools
 
 To disable (deactivate) schools:
 
-```json
-{
-  "tool": "bulk_enable_d6_schools",
-  "args": {
-    "school_login_ids": [1234],
-    "api_type_id": 8,
-    "state": 0,
-    "use_whitelist": false
-  }
-}
+```bash
+curl -s "$D6_MCP_URL/sse" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"bulk_enable_d6_schools","arguments":{"school_login_ids":[1234],"api_type_id":8,"state":0,"use_whitelist":false}}}'
 ```
 
 ## What Happens During Bulk Activation
 
-1. **Reads whitelist** from `D6_ALLOWED_SCHOOL_LOGIN_IDS` (if `use_whitelist: true`)
-2. **Validates each school** against whitelist
-3. **Sends PATCH request** for each school:
+1. **Checks the admin secret** from the `Authorization` header; without a valid one the call stops here with HTTP 401
+2. **Reads whitelist** from `D6_ALLOWED_SCHOOL_LOGIN_IDS` (if `use_whitelist: true`)
+3. **Validates each school** against whitelist
+4. **Sends PATCH request** for each school:
    ```
    PATCH /v1/settings/clients/{school_id}
    Body: { "api_type_id": 8, "state": 1 }
    ```
-4. **Waits 500ms** between requests (rate limiting)
-5. **Collects results** (success/failure per school)
-6. **Returns summary** with detailed table
+5. **Waits 500ms** between requests (rate limiting)
+6. **Collects results** (success/failure per school)
+7. **Returns summary** with detailed table
 
 ## Expected Vercel Logs
 
@@ -224,6 +238,12 @@ During bulk activation, you'll see 17 log entries like:
 
 ## Troubleshooting
 
+### Issue: "unauthorized" (HTTP 401, JSON-RPC code -32001)
+
+**Cause:** No `Authorization: Bearer ...` header, a secret that does not match, or `D6_ADMIN_SECRET` not set on the Vercel project (the response is deliberately the same in all three cases)
+
+**Solution:** Send the header with the value from the `D6_ADMIN_SECRET` environment variable on the Vercel project, and confirm the variable is set there
+
 ### Issue: Some Schools Failed
 
 **Possible causes:**
@@ -235,7 +255,7 @@ During bulk activation, you'll see 17 log entries like:
 - Check error message in results table
 - Verify school is in whitelist
 - Contact D6 support if authorization is needed
-- Retry individual schools with `enable_d6_client` tool
+- Retry individual schools with `enable_d6_client` tool (with the `Authorization` header)
 
 ### Issue: All Schools Failed
 
@@ -263,8 +283,8 @@ Complete activation and data access workflow:
 graph TD
     A[Update Vercel Env Vars] --> B[Deploy to Vercel]
     B --> C[list_d6_schools: Check Current Status]
-    C --> D[bulk_enable_d6_schools: Activate All]
-    D --> E[list_d6_schools: Verify All Active]
+    C --> D[enable_d6_client with Authorization header: one decided school at a time]
+    D --> E[list_d6_schools: Verify Active]
     E --> F[Test Data Access for Schools]
     F --> G[Build Analytics & Reports]
 ```
@@ -274,8 +294,8 @@ graph TD
 | Tool | Purpose | Usage |
 |------|---------|-------|
 | `list_d6_schools` | Discover authorized schools | Check activation status |
-| `bulk_enable_d6_schools` | Activate multiple schools | One-time setup |
-| `enable_d6_client` | Activate single school | Individual activation |
+| `bulk_enable_d6_schools` | Activate multiple schools | Admin secret required; only with a per-school decision for each school |
+| `enable_d6_client` | Activate single school | Admin secret required; the normal way Espen switches a school on |
 | `get_learners` | Access learner data | After activation |
 | `get_learner_marks` | Access marks data | After Curriculum+ activation |
 
