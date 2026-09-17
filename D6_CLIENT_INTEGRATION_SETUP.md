@@ -12,8 +12,11 @@ This document explains the D6 client integration enablement feature, which is re
 - The secret lives in the `D6_ADMIN_SECRET` environment variable on the `espen-mcp-server-d6` Vercel project (espen-os holds the same value in its own `D6_ADMIN_SECRET`). Read it from there; never paste its value into docs, chat, tickets, logs or commits.
 - Without a valid secret the call gets **HTTP 401** and the JSON-RPC error `{"code": -32001, "message": "unauthorized: ..."}`. Nothing is sent to D6.
 - If `D6_ADMIN_SECRET` is unset or empty on the server, the tool is refused for everyone (fail closed).
+- Vercel does not redeploy when an environment variable changes. If `D6_ADMIN_SECRET` was set or changed after the current deployment was built, redeploy, or the server keeps answering 401.
+- Use a long random value, for example the output of `openssl rand -base64 48`, and give espen-os the same value. The server only checks that the value is not empty, so a short or guessable one is not caught.
 - `tools/list` only includes `enable_d6_client` (and `bulk_enable_d6_schools`) for a request that carries the secret, so an MCP client such as Claude will not see the tool unless it is configured to send the header.
 - Every other tool works as before without the header.
+- Every refused call leaves a `[AUTH] refused admin tool <name>` line in the Vercel logs; an accepted one logs `[AUTH] admin tool allowed <name>`.
 
 ## Implementation Details
 
@@ -55,16 +58,29 @@ PATCH https://integrate.d6plus.co.za/api/v1/settings/clients/{school_id}
 
 ## Usage
 
-The examples call the server over HTTP. `D6_MCP_URL` is the server's base URL and `D6_ADMIN_SECRET` is read from the Vercel project's environment variable of that name; neither value belongs in this document. An MCP client must send the same `Authorization` header.
+The examples call the server over HTTP. An MCP client must send the same `Authorization` header. Set these once per shell; neither value belongs in this document:
+
+```bash
+# The espen-mcp-server-d6 Vercel project, without /sse at the end.
+# Do not reuse espen-os's D6_MCP_URL (the old Cloudflare worker, which has no switch-on tools)
+# or D6_SYNC_MCP_URL (it already ends in /sse, so the examples would call /sse/sse).
+D6_ADMIN_MCP_URL=https://espen-mcp-server-d6.vercel.app
+
+# Paste the value of the D6_ADMIN_SECRET environment variable at the prompt.
+# It is not echoed and not written to shell history.
+read -rs D6_ADMIN_SECRET
+```
+
+The examples pass the header with `-H @<(printf ...)`. `printf` is a shell builtin, so the secret never appears in curl's command line, where other users, `ps`, process accounting or a `set -x` trace could see it. Don't write `-H "Authorization: Bearer $D6_ADMIN_SECRET"`: the shell expands that into curl's arguments. The output goes through `jq` to print the tool's text, or the JSON-RPC error if the call was refused. Run `unset D6_ADMIN_SECRET` when you are done.
 
 ### Step 1: Enable Client Integration
 
 First, enable the D6 client integration for a school (this changes the school's real D6 access):
 
 ```bash
-curl -s "$D6_MCP_URL/sse" \
+curl -s "$D6_ADMIN_MCP_URL/sse" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
+  -H @<(printf 'Authorization: Bearer %s\n' "$D6_ADMIN_SECRET") \
   -d '{
     "jsonrpc": "2.0",
     "id": 1,
@@ -73,22 +89,22 @@ curl -s "$D6_MCP_URL/sse" \
       "name": "enable_d6_client",
       "arguments": { "school_login_id": 1352, "api_type_id": 8, "state": 1 }
     }
-  }'
+  }' \
+  | jq -r '.result.content[0].text // .error'
 ```
 
-**Expected Response:**
+**Expected Response** (the tool text printed by `jq`; without `jq`, curl prints it inside `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"..."}]}}`):
 ```
-✅ D6 Client Integration Enabled
+✅ **D6 Client Integration Enabled**
 
 School: Laerskool Monumentpark
 API Type ID: 8
 State: 1
 
-Response:
-{
-  ... D6 response data ...
-}
+D6 Response: (No content - successful 204 response)
 ```
+
+A refused call prints the JSON-RPC error instead, for example `{"code": -32001, "message": "unauthorized: this tool requires admin authentication"}` (HTTP 401).
 
 **Expected Log:**
 ```
@@ -136,7 +152,7 @@ async function enableD6ClientIntegration(
 ### Key Features
 
 1. **Admin Authentication**: Requires `Authorization: Bearer <D6_ADMIN_SECRET>` before anything else runs (see Authentication above)
-2. **School Whitelist Validation**: Checks that school is in `D6_ALLOWED_SCHOOL_LOGIN_IDS`
+2. **School Whitelist Validation**: Checks that school is in `D6_ALLOWED_SCHOOL_LOGIN_IDS`, and refuses every school if that list is empty
 3. **Mock Mode Protection**: Prevents use in mock/sandbox mode (production only)
 4. **Clear Logging**: `[D6 TRACE]` shows exact request and response status
 5. **Error Handling**: Surfaces D6 errors clearly for debugging
@@ -177,13 +193,13 @@ Once deployed, call the tool as shown in Usage above, with the `Authorization` h
 
 **Cause:** The request had no `Authorization: Bearer ...` header, the secret did not match, or `D6_ADMIN_SECRET` is not set on the Vercel project (the response is deliberately the same in all three cases)
 
-**Solution:** Send the header with the value from the `D6_ADMIN_SECRET` environment variable on the Vercel project, and confirm the variable is set there
+**Solution:** Send the header with the value from the `D6_ADMIN_SECRET` environment variable on the Vercel project, confirm the variable is set there, and redeploy if it was set or changed after the current deployment was built (Vercel does not redeploy on its own). Each refusal logs `[AUTH] refused admin tool enable_d6_client` in the Vercel logs.
 
-### Error: "School not allowed"
+### Error: "not in D6_ALLOWED_SCHOOL_LOGIN_IDS" or "D6_ALLOWED_SCHOOL_LOGIN_IDS is empty"
 
-**Cause:** School ID not in `D6_ALLOWED_SCHOOL_LOGIN_IDS`
+**Cause:** School ID not in `D6_ALLOWED_SCHOOL_LOGIN_IDS`, or the list is unset or empty
 
-**Solution:** Add the school ID to the environment variable in Vercel
+**Solution:** Once there is a decision for the school, append its ID to the end of the existing value in Vercel (never replace the whole list: the syncs use it too), then redeploy
 
 ### Error: "Client has not authorised access"
 
@@ -234,19 +250,23 @@ Once deployed, call the tool as shown in Usage above, with the `Authorization` h
 ## Example: Laerskool Monumentpark (1352)
 
 ```bash
+# Setup: D6_ADMIN_MCP_URL and D6_ADMIN_SECRET as shown in Usage above.
+
 # Step 1: Enable client integration (admin tool: needs the Authorization header)
-curl -s "$D6_MCP_URL/sse" \
+curl -s "$D6_ADMIN_MCP_URL/sse" \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $D6_ADMIN_SECRET" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"enable_d6_client","arguments":{"school_login_id":1352,"api_type_id":8,"state":1}}}'
+  -H @<(printf 'Authorization: Bearer %s\n' "$D6_ADMIN_SECRET") \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"enable_d6_client","arguments":{"school_login_id":1352,"api_type_id":8,"state":1}}}' \
+  | jq -r '.result.content[0].text // .error'
 
 # Expected: PATCH /v1/settings/clients/1352 -> 200
-# Without a valid secret: HTTP 401, {"error":{"code":-32001,"message":"unauthorized: ..."}}
+# Without a valid secret: HTTP 401, and jq prints {"code": -32001, "message": "unauthorized: ..."}
 
 # Step 2: Test marks access (read tool: no Authorization header needed)
-curl -s "$D6_MCP_URL/sse" \
+curl -s "$D6_ADMIN_MCP_URL/sse" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_learner_marks","arguments":{"school_login_id":1352,"learnerId":3043}}}'
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_learner_marks","arguments":{"school_login_id":1352,"learnerId":3043}}}' \
+  | jq -r '.result.content[0].text // .error'
 
 # Expected: GET /v1/currplus/learnersubjectmarks/1352?learner_id=3043 -> 200
 ```

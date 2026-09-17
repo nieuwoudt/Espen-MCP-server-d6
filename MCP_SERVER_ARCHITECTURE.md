@@ -1,6 +1,6 @@
 # Espen D6 MCP Server — Architecture & Developer Reference
 
-*Last Updated: May 11, 2026*
+*Last Updated: September 17, 2026*
 
 This document answers the core technical questions about the Espen D6 MCP server: what it is, how it's built, how auth works, what tools exist, and where data comes from. Keep this updated as the architecture evolves.
 
@@ -100,14 +100,22 @@ These are set as Vercel environment variables. Every request to `integrate.d6plu
 
 ### MCP Endpoint Auth (client → MCP server)
 
-**There is currently no per-user authentication on the MCP server.** The `/sse` endpoint is open. Anyone who knows the URL can call it.
+**There is currently no per-user authentication on the MCP server.** The `/sse` endpoint is open for every tool except the two admin tools below. Anyone who knows the URL can call the other 24.
+
+**Admin tools (bearer secret).** `enable_d6_client` and `bulk_enable_d6_schools` switch a school's D6 access on or off, so they require the header `Authorization: Bearer <D6_ADMIN_SECRET>`:
+- The secret is accepted only from that header, never from the URL or the JSON body. Both values are hashed with SHA-256 (Web Crypto) and compared in constant time.
+- Without a valid secret: HTTP 401, `WWW-Authenticate: Bearer`, JSON-RPC error `{"code": -32001, "message": "unauthorized: this tool requires admin authentication"}`. The body is the same whether the header is missing, wrong, or no secret is configured. Nothing is sent to D6, and the log gets `[AUTH] refused admin tool <name>`.
+- Fails closed: if `D6_ADMIN_SECRET` is unset or empty on the server, both tools are refused for everyone.
+- The gate runs before the school allow-list and the mock-mode guards (including the production mock-mode guard). After it, both tools only switch schools on a non-empty `D6_ALLOWED_SCHOOL_LOGIN_IDS`, including every explicit `school_login_ids` entry.
+- `tools/list` includes the two admin tools only for an authenticated request.
+- Vercel only applies a new or changed `D6_ADMIN_SECRET` to a new deployment, so redeploy after setting it.
 
 What does NOT exist yet:
 - No JWT verification
 - No OAuth flow
 - No Anthropic MCP auth protocol integration
 - No per-user scoping (teacher_id, parent_id, learner_id are **not** derived from auth)
-- No API keys or bearer tokens
+- No API keys or bearer tokens for any tool other than the two admin tools
 
 This means `teacher_id` / `parent_id` / `learner_id` from the spec are **not yet resolved from server-side auth** — that layer needs to be built.
 
@@ -122,6 +130,8 @@ This means `teacher_id` / `parent_id` / `learner_id` from the spec are **not yet
 ## 4. MCP Tools (26 Total)
 
 All tools hit **D6 directly** at request time. None go through Supabase.
+
+An unauthenticated `tools/list` returns 24 tools: `enable_d6_client` and `bulk_enable_d6_schools` are listed only for a request with the admin secret (see section 3).
 
 ### Core Data Tools
 
@@ -158,8 +168,8 @@ All tools hit **D6 directly** at request time. None go through Supabase.
 |---|------|-------------|-------|
 | 15 | `d6_get_school_info` | GET `/v1/adminplus/school/{id}` | Direct school info |
 | 16 | `d6_get_learners` | GET `/v1/adminplus/learners/{id}` | Direct learners with explicit school_login_id required |
-| 17 | `enable_d6_client` | PATCH `/v1/settings/clients/{id}` | Enable/disable D6 integration for a school |
-| 18 | `bulk_enable_d6_schools` | PATCH (loop) `/v1/settings/clients/{id}` | Batch school activation |
+| 17 | `enable_d6_client` | PATCH `/v1/settings/clients/{id}` | Enable/disable D6 integration for a school. **Admin: requires `Authorization: Bearer <D6_ADMIN_SECRET>`** |
+| 18 | `bulk_enable_d6_schools` | PATCH (loop) `/v1/settings/clients/{id}` | Batch school activation. **Admin: requires `Authorization: Bearer <D6_ADMIN_SECRET>`**; every school must be on the allow-list |
 | 19 | `list_d6_schools` | GET `/v1/settings/clients` | Filtered school listing |
 
 ### Admin+ Learner pastoral (attendance & discipline)
@@ -196,6 +206,7 @@ Vercel Edge Function (api/mcp.ts)
 handleMcpRequest (src/mcpHandler.ts)
   │
   │  Routes JSON-RPC method → handleToolCall()
+  │  Refuses the two admin tools without the Bearer secret (HTTP 401)
   │  Resolves school_login_id from args (default: 1352)
   │  Asserts school is whitelisted
   ▼
@@ -221,6 +232,7 @@ All data calls go **directly to D6**. Supabase is not in the production data pat
 | `D6_MOCK_MODE` | No | `true` for local dev, `false` (or unset) for production |
 | `D6_ALLOWED_SCHOOL_LOGIN_IDS` | No | Comma-separated whitelist of school IDs |
 | `D6_SCHOOL_MAP` | No | `id:Name,id:Name` mapping for logging |
+| `D6_ADMIN_SECRET` | For admin tools | Bearer secret for `enable_d6_client` and `bulk_enable_d6_schools`. Unset or empty refuses both for everyone. Same value on espen-os. Redeploy after changing it |
 | `NODE_ENV` | No | `production` in Vercel |
 | `ESPEN_ENV` | No | `production` blocks mock mode |
 
